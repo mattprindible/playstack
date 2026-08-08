@@ -334,13 +334,30 @@ The most confusing part of any multi-platform setup, so here it is plainly.
 | --- | --- | --- |
 | `.env` (local, gitignored) | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | copied from `.env.example` |
 | `apps/worker/.dev.vars` | same two, for `wrangler dev` | created by hand |
-| Cloudflare | same two, in production | `wrangler secret put` — **once**, they persist |
+| Cloudflare | same two, in production | `wrangler secret put` — **once per Worker**, they persist |
 | Vercel | same two, in production | `vercel env add` |
 | GitHub Actions | deploy credentials only | repo secrets |
 
 Note the Worker's secrets live on Cloudflare and are *not* passed through CI. CI
 only holds credentials to *deploy*, never the app's own configuration — so a
 leaked CI token has a much smaller blast radius.
+
+**Secrets are per-Worker, and this bites.** `playstack` and `playstack-access`
+are two separate Workers; setting a secret on one does nothing for the other.
+Deploying the Access variant looked fine and then 503'd at runtime, because it
+had the Access config but no `SUPABASE_URL`. Adding a Worker means adding its
+secrets:
+
+```bash
+cd apps/worker-access
+printf '%s' "$SUPABASE_URL"      | pnpm exec wrangler secret put SUPABASE_URL
+printf '%s' "$SUPABASE_ANON_KEY" | pnpm exec wrangler secret put SUPABASE_ANON_KEY
+pnpm exec wrangler secret list   # confirm before assuming
+```
+
+It surfaced quickly only because `readEnv` names the missing variables in the
+response body. A generic "server error" would have sent you reading Access logs
+for something that had nothing to do with Access.
 
 **About the anon key:** it's designed to be public, and it ships to the browser.
 Its power is bounded entirely by Row Level Security. That's the bargain — the key
