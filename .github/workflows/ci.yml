@@ -116,20 +116,30 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      # Build here rather than on Vercel's builders, so the artifact that ships
-      # is the one produced by this exact, already-tested commit.
+      # Build LOCALLY, then upload only the output (`--prebuilt`).
+      #
+      # This is not an optimisation, it is the only thing that works here.
+      # Vercel's remote builder uploads just the linked directory (apps/web),
+      # so packages/core is absent, and it cannot install a pnpm workspace
+      # anyway. Building in this job — where the whole monorepo exists and
+      # pnpm is available — sidesteps both problems, and ships the artifact
+      # produced by this exact, already-tested commit.
+      #
+      # `pnpm --filter ... exec` uses the version pinned in pnpm-lock.yaml.
+      # `pnpm dlx vercel` would fetch whatever is newest at deploy time, which
+      # defeats the point of a lockfile.
       - name: Pull Vercel project settings
-        run: pnpm dlx vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+        run: pnpm --filter @playstack/web exec vercel pull --yes --environment=production --token=$VERCEL_TOKEN
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
       - name: Build
-        run: pnpm dlx vercel build --prod --token=$VERCEL_TOKEN
+        run: pnpm --filter @playstack/web exec vercel build --prod --token=$VERCEL_TOKEN
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
       - name: Deploy
-        run: pnpm dlx vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+        run: pnpm --filter @playstack/web exec vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 

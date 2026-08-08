@@ -15,6 +15,19 @@ packages:
 # ---------------------------------------------------------------------------
 minimumReleaseAge: 1440
 
+# pnpm 11 will install and lock ITSELF when package.json has a "packageManager"
+# field, recording `packageManagerDependencies` in pnpm-lock.yaml.
+#
+# That is a reasonable feature, but Vercel's build image cannot parse a lockfile
+# containing those pnpm 11-only keys. It gives up with "Error while parsing
+# config file: pnpm-lock.yaml", silently falls back to npm, and npm then fails
+# on `workspace:*` — a confusing chain that ends nowhere near the real cause.
+#
+# Turning self-management off keeps the lockfile readable by older parsers.
+# The "packageManager" field in package.json still pins the version for
+# corepack and for CI.
+managePackageManagerVersions: false
+
 # Lockfile is the source of truth. CI uses --frozen-lockfile so a compromised
 # or drifted registry cannot quietly change what gets installed.
 resolutionMode: highest

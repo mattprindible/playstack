@@ -15,6 +15,15 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
 
+    // ...but Vercel compiles ahead of time, emitting .js while leaving the
+    // import specifier saying ".ts". The Function then dies at runtime with
+    // ERR_MODULE_NOT_FOUND looking for a .ts file that no longer exists.
+    //
+    // This rewrites relative ".ts" specifiers to ".js" in EMITTED output only.
+    // Source keeps .ts, so `node --test` and `tsc --noEmit` are unaffected;
+    // anything that actually compiles (Vercel) gets working specifiers.
+    "rewriteRelativeImportExtensions": true,
+
     // Fails the build on any TypeScript syntax Node CANNOT strip
     // (enums, namespaces, parameter properties, decorators).
     // This is what guarantees the "no build step" promise keeps holding.

@@ -4,13 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "deploy": "vercel deploy --prod"
-  },
-  "dependencies": {
-    "@playstack/core": "workspace:*"
+    "vercel:build": "vercel build --prod",
+    "vercel:deploy": "vercel deploy --prebuilt --prod"
   },
   "devDependencies": {
-    "@vercel/config": "^0.5.6"
+    "vercel": "^58.7.1"
   }
 }

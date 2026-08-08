@@ -93,7 +93,16 @@ export function validateNewMessage(input: unknown): ValidationResult {
  */
 export function createHandler(deps: HandlerDeps) {
   return async function handler(request: Request): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    // The one genuine incompatibility found between the two hosts:
+    //
+    //   Cloudflare -> request.url is ABSOLUTE  ("https://host/api/health")
+    //   Vercel     -> request.url is a PATH    ("/api/health?...path=health")
+    //
+    // `new URL("/api/health")` throws ERR_INVALID_URL, which took down every
+    // Vercel request until this base was added. When the input is already
+    // absolute the base is ignored, so this is correct on both platforms.
+    // The host below is a placeholder and is never used for routing.
+    const { pathname } = new URL(request.url, "http://playstack.invalid");
 
     // Browser preflight for cross-origin POSTs.
     if (request.method === "OPTIONS") {

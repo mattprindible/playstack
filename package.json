@@ -16,10 +16,10 @@
     "db:reset": "supabase db reset",
     "db:diff": "supabase db diff",
     "db:push": "supabase db push",
-    "dev:web": "pnpm --filter @playstack/web dev",
+    "dev:web": "pnpm --filter @playstack/web exec vercel dev",
     "dev:worker": "pnpm --filter @playstack/worker dev",
     "deploy:worker": "pnpm --filter @playstack/worker deploy",
-    "deploy:vercel": "pnpm --filter @playstack/api-vercel deploy"
+    "deploy:vercel": "pnpm --filter @playstack/web exec vercel build --prod && pnpm --filter @playstack/web exec vercel deploy --prebuilt --prod"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

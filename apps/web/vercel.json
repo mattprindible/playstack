@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": null,
+  "outputDirectory": "public",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "x-content-type-options", "value": "nosniff" },
+        { "key": "referrer-policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [{ "key": "cache-control", "value": "no-store" }]
+    }
+  ]
+}

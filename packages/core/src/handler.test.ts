@@ -140,6 +140,32 @@ test("unknown routes 404 and preflight succeeds", async () => {
   assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
 });
 
+test("routes work when request.url is a bare path (the Vercel shape)", async () => {
+  // Regression test for a real production outage. Cloudflare hands the handler
+  // an absolute request.url; Vercel's Node runtime hands it a path plus the
+  // catch-all query param. Every Vercel request 500'd on ERR_INVALID_URL until
+  // `new URL(..., base)` was used.
+  //
+  // Request normalises a relative URL, so we call the handler directly with a
+  // minimal stand-in to reproduce exactly what Vercel passes in.
+  const handler = handlerWith(stubFetch({ body: [SAMPLE] }), "vercel");
+
+  const vercelStyle = {
+    url: "/api/health?...path=health",
+    method: "GET",
+  } as unknown as Request;
+
+  const response = await handler(vercelStyle);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { status: "ok", platform: "vercel" });
+
+  const messages = await handler({
+    url: "/api/messages?...path=messages",
+    method: "GET",
+  } as unknown as Request);
+  assert.equal(messages.status, 200);
+});
+
 test("validateNewMessage enforces the documented limits", () => {
   assert.equal(validateNewMessage({ name: "a", body: "b" }).ok, true);
 
