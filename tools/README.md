@@ -26,8 +26,8 @@ injects values with no file present.
 | Variable | Used by | Required |
 | --- | --- | --- |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | all commands | yes |
+| `SUPABASE_JWT_KID`, `SUPABASE_JWT_PRIVATE_KEY` | `seed`; `audit-rls` pass 2 | see below |
 | `VERCEL_URL` | `status` | optional |
-| `WORKER_URL` | `status` | optional |
 | `ACCESS_URL` | `status` | optional |
 
 `status` skips any deployment whose URL is unset, so it degrades quietly rather
@@ -35,10 +35,25 @@ than failing.
 
 ## What `audit-rls` actually proves
 
-It does not read the policy files and take their word for it. Holding only the
-public anon key, it behaves like an attacker: reads, inserts, then tries to
-tamper with and delete its own canary row, and checks that the OAuth session
-tables are invisible.
+It does not read the policy files and take their word for it. It behaves like
+an attacker and checks what the database genuinely permits, in two passes.
 
-The canary row is deliberately left behind — **being unable to delete it is the
-passing result.** Removing it requires `service_role`.
+**Pass 1 — holding only the public anon key.** The honest answer is now
+*nothing at all*: anon has no grants on `public.messages`, so it cannot even
+read. It also presents a token with perfect claims and a bogus signature, which
+must be refused — that check is what makes the anon key being public costless.
+This pass needs no secrets and is the one that matters, because it is what a
+stranger can reach.
+
+**Pass 2 — holding a token minted from the signing key.** Verifies that a real
+caller can read and write *as themselves*, and cannot write as another subject,
+another display name, or another gate. Skipped with a warning if the signing
+key is not configured locally.
+
+Both passes end by confirming nobody can edit or delete anything, **including
+their own rows** — there is no update or delete policy, and their absence is
+the enforcement.
+
+`seed` needs the signing key too. Since the migration there is no way to insert
+a row that nobody vouched for, so seeded messages are attributed to an
+obviously synthetic `seed:` subject rather than passed off as real people.

@@ -5,10 +5,15 @@ description = "Operational scripts for the playstack monorepo."
 readme = "README.md"
 requires-python = ">=3.13"
 
-# One dependency, deliberately. uv resolves it into uv.lock with hashes for
+# Two dependencies, deliberately. uv resolves them into uv.lock with hashes for
 # every transitive package, and `uv sync --locked` in CI installs exactly that
 # set or fails. Same guarantee pnpm's lockfile gives the JS side.
-dependencies = ["httpx>=0.28"]
+#
+# pyjwt arrived when the guestbook stopped accepting unattributed writes: every
+# insert now needs an ES256 token minted from the project signing key, and
+# hand-rolling that encoding in Python to save a dependency would be exactly
+# the wrong trade.
+dependencies = ["httpx>=0.28", "pyjwt[crypto]>=2.10"]
 
 [project.scripts]
 playstack-ops = "playstack_ops.cli:main"

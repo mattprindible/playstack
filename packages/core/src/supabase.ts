@@ -6,14 +6,20 @@
  * calls. We skip the wrapper here so the wire format is visible, because the
  * whole point of this repo is that nothing is hidden.
  *
- * The two headers below are the entire authentication story for anonymous
- * access:
- *   apikey        -> identifies the project
+ * The two headers below are the entire authentication story, and they do
+ * genuinely different jobs:
+ *   apikey        -> identifies the PROJECT (Supabase's gateway needs it to route)
  *   Authorization -> the JWT whose claims Row Level Security evaluates
  *
- * Because we send the ANON key, every query here is still subject to the RLS
- * policies defined in supabase/migrations/. The database, not this file, is
- * what actually enforces access control.
+ * Most Supabase code sends the same anon key for both, which is why almost
+ * nobody notices they are separate. Here they are not: `apikey` stays the anon
+ * key, while `Authorization` carries a short-lived token minted for the
+ * verified caller (see token.ts). PostgREST reads that token, switches to the
+ * `authenticated` role, and exposes its claims to the policies.
+ *
+ * The anon key has been REVOKEd from public.messages entirely, so it can no
+ * longer read or write this table on its own. The database, not this file, is
+ * what enforces access control.
  */
 
 import type { Env } from "./env.ts";
@@ -31,6 +37,16 @@ export type NewMessage = {
 };
 
 /**
+ * A message plus the attribution the database will check against the caller's
+ * token. `subject` is never sent to the browser — it is the stable identity,
+ * and listMessages deliberately does not select it.
+ */
+export type AttributedMessage = NewMessage & {
+  subject: string;
+  gate: string;
+};
+
+/**
  * We pass `fetch` in rather than reaching for the global.
  * That is what lets the tests run with zero network and zero mocking library.
  */
@@ -40,10 +56,14 @@ function restUrl(env: Env, path: string): string {
   return `${env.SUPABASE_URL}/rest/v1/${path}`;
 }
 
-function headers(env: Env): Record<string, string> {
+/**
+ * `accessToken` is the minted per-caller JWT. It is what RLS evaluates; the
+ * anon key alone can no longer touch this table.
+ */
+function headers(env: Env, accessToken: string): Record<string, string> {
   return {
     apikey: env.SUPABASE_ANON_KEY,
-    Authorization: `Bearer ${env.SUPABASE_ANON_KEY}`,
+    Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
   };
 }
@@ -72,9 +92,14 @@ async function assertOk(response: Response): Promise<void> {
 export async function listMessages(
   env: Env,
   fetchImpl: FetchLike,
+  accessToken: string,
   limit = 50,
 ): Promise<Message[]> {
   const query = new URLSearchParams({
+    // `subject` and `gate` are deliberately NOT selected. They exist so the
+    // database can verify attribution, not so the browser can display it —
+    // publishing a stable identifier for every author is how you turn a
+    // guestbook into a people-directory.
     select: "id,name,body,created_at",
     order: "created_at.desc",
     limit: String(limit),
@@ -82,7 +107,7 @@ export async function listMessages(
 
   const response = await fetchImpl(restUrl(env, `messages?${query}`), {
     method: "GET",
-    headers: headers(env),
+    headers: headers(env, accessToken),
   });
 
   await assertOk(response);
@@ -98,11 +123,12 @@ export async function listMessages(
 export async function createMessage(
   env: Env,
   fetchImpl: FetchLike,
-  input: NewMessage,
+  accessToken: string,
+  input: AttributedMessage,
 ): Promise<Message> {
   const response = await fetchImpl(restUrl(env, "messages"), {
     method: "POST",
-    headers: { ...headers(env), Prefer: "return=representation" },
+    headers: { ...headers(env, accessToken), Prefer: "return=representation" },
     body: JSON.stringify(input),
   });
 

@@ -33,19 +33,32 @@ WARN = "\033[33m!\033[0m"
 # seed
 # --------------------------------------------------------------------------
 def seed(count: int) -> int:
-    """Insert sample rows so the UI has something to show."""
+    """Insert sample rows so the UI has something to show.
+
+    Seeded rows are attributed to a clearly synthetic subject rather than being
+    passed off as real people. The database would refuse them otherwise: since
+    the attributed-messages migration there is no way to insert a row that
+    nobody vouched for, and that is the feature, not an obstacle.
+    """
     config = load_config()
     created = 0
 
     with httpx.Client(timeout=15.0) as client:
         for _ in range(count):
+            name = random.choice(NAMES)
+            subject = f"seed:{name.lower().replace(' ', '-')}"
             payload = {
-                "name": random.choice(NAMES),
+                "name": name,
                 "body": random.choice(LINES),
+                "subject": subject,
+                "gate": "seed",
             }
             response = client.post(
                 f"{config.rest_url}/messages",
-                headers={**config.headers, "Prefer": "return=representation"},
+                headers={
+                    **config.signed_headers(subject, "seed", name),
+                    "Prefer": "return=representation",
+                },
                 json=payload,
             )
             if response.status_code >= 400:
@@ -62,86 +75,71 @@ def seed(count: int) -> int:
 # audit-rls
 # --------------------------------------------------------------------------
 def audit_rls() -> int:
-    """Prove Row Level Security is actually enforced.
+    """Prove the database — not the application — enforces who may write.
 
     This does not read your policy files and take their word for it. It behaves
-    like an attacker holding your public anon key and checks what the database
-    genuinely permits.
+    like an attacker and checks what the database genuinely permits, in two
+    passes:
+
+      1. Holding only the public anon key. Since the attributed-messages
+         migration the honest answer is "nothing at all": anon has no grants on
+         public.messages, so it cannot even read.
+
+      2. Holding a token minted from the signing key. This half is skipped if
+         the key is not configured locally, because the FIRST half is the one
+         that matters — it is what a stranger can reach.
     """
     config = load_config()
     failures = 0
 
-    print("Auditing RLS with the ANON key (what any visitor could do)\n")
+    print("Pass 1 — holding only the public anon key\n")
 
     with httpx.Client(timeout=15.0) as client:
-        # 1. Reading should be allowed — it is a public guestbook.
-        response = client.get(
+        # Anon used to be able to read and insert. Both must now be refused
+        # outright: the grant is gone, so this is a permission error rather
+        # than an empty result.
+        probe = client.get(
             f"{config.rest_url}/messages", headers=config.headers, params={"limit": 1}
         )
-        if response.status_code == 200:
-            print(f"{OK} SELECT permitted (expected — the guestbook is public)")
-        else:
-            print(f"{FAIL} SELECT blocked ({response.status_code}); the app cannot work")
-            return 1
-
-        # 2. Insert a canary we can then try to tamper with.
-        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        response = client.post(
-            f"{config.rest_url}/messages",
-            headers={**config.headers, "Prefer": "return=representation"},
-            json={"name": "rls-audit", "body": f"canary {stamp}"},
-        )
-        if response.status_code >= 400:
-            print(f"{FAIL} INSERT blocked ({response.status_code}); the app cannot work")
-            return 1
-
-        canary = response.json()[0]
-        canary_id = canary["id"]
-        print(f"{OK} INSERT permitted (expected — anyone may sign)")
-
-        # 3. Tampering must fail. There is no UPDATE policy, so RLS should match
-        #    zero rows and change nothing.
-        client.patch(
-            f"{config.rest_url}/messages",
-            headers=config.headers,
-            params={"id": f"eq.{canary_id}"},
-            json={"body": "TAMPERED"},
-        )
-        check = client.get(
-            f"{config.rest_url}/messages",
-            headers=config.headers,
-            params={"id": f"eq.{canary_id}", "select": "body"},
-        ).json()
-
-        if check and check[0]["body"] == "TAMPERED":
-            print(f"{FAIL} UPDATE SUCCEEDED — anyone can rewrite others' messages!")
+        if probe.status_code == 200:
+            print(f"{FAIL} anon can still READ the guestbook (HTTP 200)")
             failures += 1
         else:
-            print(f"{OK} UPDATE denied (no update policy exists)")
+            print(f"{OK} anon cannot read messages (HTTP {probe.status_code})")
 
-        # 4. Deletion must fail too.
-        client.delete(
+        probe = client.post(
             f"{config.rest_url}/messages",
             headers=config.headers,
-            params={"id": f"eq.{canary_id}"},
+            json={"name": "rls-audit", "body": "canary", "subject": "x", "gate": "none"},
         )
-        still_there = client.get(
-            f"{config.rest_url}/messages",
-            headers=config.headers,
-            params={"id": f"eq.{canary_id}", "select": "id"},
-        ).json()
-
-        if still_there:
-            print(f"{OK} DELETE denied (no delete policy exists)")
-        else:
-            print(f"{FAIL} DELETE SUCCEEDED — anyone can erase the guestbook!")
+        if probe.status_code < 400:
+            print(f"{FAIL} anon can still WRITE to the guestbook (HTTP {probe.status_code})")
             failures += 1
+        else:
+            print(f"{OK} anon cannot write messages (HTTP {probe.status_code})")
 
-        # 5. The OAuth tables hold refresh tokens and DPoP private keys. The
-        #    anon key must not see them AT ALL — not an empty list, not a 401,
-        #    but a 404, because the tables are REVOKEd rather than merely
-        #    policy-filtered. PostgREST then reports them as nonexistent, which
-        #    leaks nothing about what this project stores.
+        # A token with perfect claims but the wrong signature. This is what
+        # separates "holding a key" from "holding THE key" — and it is why the
+        # anon key being public costs nothing.
+        forged = (
+            "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiJkaWQ6cGxjOmF0dGFja2VyIiwicm9sZSI6ImF1dGhlbnRpY2F0ZWQifQ."
+            "ZmFrZS1zaWduYXR1cmUtdGhhdC1zaG91bGQtbmV2ZXItdmVyaWZ5"
+        )
+        probe = client.get(
+            f"{config.rest_url}/messages",
+            headers={**config.headers, "Authorization": f"Bearer {forged}"},
+            params={"limit": 1},
+        )
+        if probe.status_code == 200:
+            print(f"{FAIL} a FORGED token was accepted — signature verification is broken!")
+            failures += 1
+        else:
+            print(f"{OK} a forged token is rejected (HTTP {probe.status_code})")
+
+        # The OAuth tables hold refresh tokens and DPoP private keys. The anon
+        # key must not see them AT ALL — not an empty list, but a hard refusal,
+        # because the tables are REVOKEd rather than merely policy-filtered.
         for table in ("atproto_states", "atproto_sessions"):
             probe = client.get(
                 f"{config.rest_url}/{table}",
@@ -151,21 +149,110 @@ def audit_rls() -> int:
             if probe.status_code == 200:
                 print(f"{FAIL} {table} IS READABLE with the anon key — refresh tokens exposed!")
                 failures += 1
-            elif probe.status_code == 404:
-                print(f"{OK} {table} invisible to anon (404, not an empty list)")
             else:
-                print(f"{OK} {table} blocked to anon (HTTP {probe.status_code})")
+                print(f"{OK} {table} invisible to anon (HTTP {probe.status_code})")
+
+        # ------------------------------------------------------------------
+        # Pass 2 — holding a legitimately minted token.
+        # ------------------------------------------------------------------
+        if not (config.jwt_kid and config.jwt_private_jwk):
+            print(
+                f"\n{WARN} Pass 2 skipped: no signing key configured locally.\n"
+                f"  Set SUPABASE_JWT_KID and SUPABASE_JWT_PRIVATE_KEY to check\n"
+                f"  that a real token can only write as itself."
+            )
+        else:
+            print("\nPass 2 — holding a token minted from the signing key\n")
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            me = "audit:self"
+            mine = config.signed_headers(me, "audit", "rls-audit")
+
+            probe = client.get(
+                f"{config.rest_url}/messages", headers=mine, params={"limit": 1}
+            )
+            if probe.status_code == 200:
+                print(f"{OK} a signed-in caller CAN read")
+            else:
+                print(f"{FAIL} a signed-in caller cannot read (HTTP {probe.status_code}); the app is broken")
+                failures += 1
+
+            probe = client.post(
+                f"{config.rest_url}/messages",
+                headers={**mine, "Prefer": "return=representation"},
+                json={
+                    "name": "rls-audit",
+                    "body": f"canary {stamp}",
+                    "subject": me,
+                    "gate": "audit",
+                },
+            )
+            if probe.status_code == 201:
+                canary_id = probe.json()[0]["id"]
+                print(f"{OK} a signed-in caller can write AS THEMSELVES")
+            else:
+                canary_id = None
+                print(f"{FAIL} a signed-in caller cannot write (HTTP {probe.status_code}); the app is broken")
+                failures += 1
+
+            # THE point of the whole migration: the token says who you are, and
+            # the row has to agree. Impersonation is refused by Postgres, not
+            # by the handler being careful.
+            impersonations = [
+                ("another subject", {"subject": "did:plc:somebody-else", "gate": "audit", "name": "rls-audit"}),
+                ("another display name", {"subject": me, "gate": "audit", "name": "Someone Important"}),
+                ("another gate", {"subject": me, "gate": "cloudflare-access", "name": "rls-audit"}),
+            ]
+            for what, row in impersonations:
+                probe = client.post(
+                    f"{config.rest_url}/messages", headers=mine, json={**row, "body": "impersonation"}
+                )
+                if probe.status_code < 400:
+                    print(f"{FAIL} a signed-in caller COULD write as {what}!")
+                    failures += 1
+                else:
+                    print(f"{OK} cannot write as {what} (HTTP {probe.status_code})")
+
+            if canary_id is not None:
+                client.patch(
+                    f"{config.rest_url}/messages",
+                    headers=mine,
+                    params={"id": f"eq.{canary_id}"},
+                    json={"body": "TAMPERED"},
+                )
+                check = client.get(
+                    f"{config.rest_url}/messages",
+                    headers=mine,
+                    params={"id": f"eq.{canary_id}", "select": "body"},
+                ).json()
+                if check and check[0]["body"] == "TAMPERED":
+                    print(f"{FAIL} UPDATE SUCCEEDED — a signer can rewrite their own history!")
+                    failures += 1
+                else:
+                    print(f"{OK} cannot edit even their OWN row (no update policy)")
+
+                client.delete(
+                    f"{config.rest_url}/messages", headers=mine, params={"id": f"eq.{canary_id}"}
+                )
+                still = client.get(
+                    f"{config.rest_url}/messages",
+                    headers=mine,
+                    params={"id": f"eq.{canary_id}", "select": "id"},
+                ).json()
+                if still:
+                    print(f"{OK} cannot delete even their OWN row (no delete policy)")
+                else:
+                    print(f"{FAIL} DELETE SUCCEEDED — the guestbook is erasable!")
+                    failures += 1
 
     print()
     if failures:
-        print(f"{FAIL} {failures} RLS check(s) FAILED. Review supabase/migrations/.")
+        print(f"{FAIL} {failures} check(s) FAILED. Review supabase/migrations/.")
         return 1
 
     print(
-        f"{OK} RLS enforced.\n\n"
-        f"  The canary row (id={canary_id}) is deliberately left behind: being\n"
-        f"  unable to delete it is the proof. Removing it requires the\n"
-        f"  service_role key, which bypasses RLS and lives only in the dashboard."
+        f"{OK} The database enforces attribution.\n\n"
+        f"  Forging an entry now requires the SIGNING KEY, not a bearer key.\n"
+        f"  The anon key is public by design and, on this table, useless."
     )
     return 0
 
@@ -213,7 +300,6 @@ def status() -> int:
     """Check every deployment that has a URL configured."""
     targets = [
         ("vercel", os.environ.get("VERCEL_URL")),
-        ("cloudflare", os.environ.get("WORKER_URL")),
         ("cf-access", os.environ.get("ACCESS_URL")),
     ]
 
@@ -221,7 +307,7 @@ def status() -> int:
     if not configured:
         print(
             f"{WARN} No deployment URLs set.\n"
-            f"  Export VERCEL_URL and/or WORKER_URL, or add them to .env."
+            f"  Export VERCEL_URL and/or ACCESS_URL, or add them to .env."
         )
         return 0
 

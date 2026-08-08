@@ -11,7 +11,9 @@ export {
   listMessages,
   createMessage,
   SupabaseError,
+  type AttributedMessage,
   type FetchLike,
   type Message,
   type NewMessage,
 } from "./supabase.ts";
+export { readSigningKey, mintAccessToken, type SigningKey } from "./token.ts";

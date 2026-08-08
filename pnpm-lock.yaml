@@ -34,16 +34,6 @@ importers:
         specifier: ^58.7.1
         version: 58.7.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(supports-color@10.2.2)
 
-  apps/worker:
-    dependencies:
-      '@playstack/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-    devDependencies:
-      wrangler:
-        specifier: ^4.120.0
-        version: 4.120.0
-
   apps/worker-access:
     dependencies:
       '@playstack/core':
@@ -57,7 +47,11 @@ importers:
         specifier: ^4.120.0
         version: 4.120.0
 
-  packages/core: {}
+  packages/core:
+    dependencies:
+      jose:
+        specifier: ^6.2.8
+        version: 6.2.8
 
 packages:
 
