@@ -20,11 +20,42 @@ import {
   type NewMessage,
 } from "./supabase.ts";
 
+/**
+ * A caller whose identity some gate has already verified.
+ *
+ * `label` is shown publicly as the message author (an email, an ATProto
+ * handle). `subject` is the stable unique id (a DID, an Access user UUID) and
+ * is never displayed — labels can change, subjects should not.
+ */
+export type Identity = {
+  label: string;
+  subject: string;
+};
+
+/**
+ * An authentication strategy. The core knows nothing about how identity is
+ * established — only that some gate can either produce one or refuse.
+ *
+ * That indirection is the entire reason one guestbook can run ungated, behind
+ * Cloudflare Access, or behind ATProto OAuth without its logic changing.
+ */
+export type Gate = {
+  /** Advertised at /api/health so the frontend can adapt to it. */
+  name: string;
+  resolve: (request: Request) => Promise<Identity | null>;
+};
+
 export type HandlerDeps = {
   env: Env;
   fetch: FetchLike;
   /** Which host is answering. Surfaced at /api/health so you can prove it. */
   platform: string;
+  /**
+   * Optional. With no gate the guestbook is public and anyone may type any
+   * name. With a gate, the API demands a verified identity and messages are
+   * attributed to it — a visitor cannot sign as someone else.
+   */
+  gate?: Gate;
 };
 
 export const LIMITS = {
@@ -110,11 +141,30 @@ export function createHandler(deps: HandlerDeps) {
     }
 
     try {
+      // Health is deliberately ungated: the frontend calls it BEFORE it knows
+      // whether it is signed in, to discover which gate is active and who it
+      // is talking as. It exposes no data beyond that.
       if (pathname === "/api/health" && request.method === "GET") {
-        return json({ status: "ok", platform: deps.platform });
+        const whoami = deps.gate ? await deps.gate.resolve(request) : null;
+        return json({
+          status: "ok",
+          platform: deps.platform,
+          gate: deps.gate?.name ?? null,
+          identity: whoami?.label ?? null,
+        });
       }
 
       if (pathname === "/api/messages") {
+        // Resolve identity once, before any method-specific work. If a gate is
+        // configured and cannot vouch for this caller, nothing else happens.
+        let identity: Identity | null = null;
+        if (deps.gate) {
+          identity = await deps.gate.resolve(request);
+          if (!identity) {
+            return json({ error: `Not authenticated (${deps.gate.name})` }, 401);
+          }
+        }
+
         if (request.method === "GET") {
           const messages = await listMessages(deps.env, deps.fetch);
           return json({ messages });
@@ -126,6 +176,21 @@ export function createHandler(deps: HandlerDeps) {
             payload = await request.json();
           } catch {
             return json({ error: "Request body must be valid JSON" }, 400);
+          }
+
+          if (identity) {
+            // OVERWRITE rather than default. The client may well have sent a
+            // `name`; when a gate is active that field is not theirs to choose,
+            // and honouring it would let anyone sign as anyone.
+            if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+              // Sliced because the column caps at nameMax and a verified email
+              // or handle can be longer. Truncating a trusted label beats
+              // rejecting a legitimate post.
+              (payload as Record<string, unknown>).name = identity.label.slice(
+                0,
+                LIMITS.nameMax,
+              );
+            }
           }
 
           const result = validateNewMessage(payload);

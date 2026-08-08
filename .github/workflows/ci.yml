@@ -161,8 +161,18 @@ jobs:
       # on Cloudflare, uploaded once with `wrangler secret put`, and persist
       # across deploys. CI only needs permission to deploy, not the app's
       # configuration — keep the blast radius of a leaked CI token small.
-      - name: Deploy Worker
+      - name: Deploy Worker (public)
         run: pnpm --filter @playstack/worker exec wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Prototype A. Same guestbook, gated by Cloudflare Access.
+      # ACCESS_TEAM_DOMAIN / ACCESS_AUD are plain vars in its wrangler.jsonc —
+      # they are public identifiers, and the security comes from verifying the
+      # JWT signature, not from concealing them.
+      - name: Deploy Worker (Access-gated)
+        run: pnpm --filter @playstack/worker-access exec wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

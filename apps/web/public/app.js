@@ -13,6 +13,9 @@ const countEl = $("count");
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
+/** Set by loadSession(): true when an auth gate is in front of this deployment. */
+let gated = false;
+
 /** Turn a timestamp into "3 minutes ago" without pulling in a date library. */
 function timeAgo(iso) {
   const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -84,12 +87,43 @@ async function loadMessages() {
   render(data.messages);
 }
 
-/** Ask the API which host answered, and show it. Same code, two platforms. */
-async function loadPlatform() {
+/**
+ * Ask the API who is answering and whether a gate is in front of it.
+ *
+ * One frontend serves every variant of this app. Rather than building three
+ * builds, the page asks /api/health at startup and adapts:
+ *
+ *   no gate            -> type any name you like
+ *   gate + identity     -> name field disappears; the server signs for you
+ *   gate + no identity  -> you are not signed in
+ *
+ * The name input is REMOVED rather than pre-filled when a gate is active,
+ * because with a gate the server overwrites it regardless. Showing an editable
+ * field whose value is discarded would be a small lie about how it works.
+ */
+async function loadSession() {
   try {
     const response = await fetch("/api/health");
     const data = await response.json();
+
     $("platform").textContent = data.platform ?? "unknown";
+    gated = Boolean(data.gate);
+
+    if (!gated) return;
+
+    $("name-field").hidden = true;
+    $("name").required = false;
+
+    const whoami = $("whoami");
+    whoami.hidden = false;
+
+    if (data.identity) {
+      whoami.textContent = `Signed in as ${data.identity}`;
+    } else {
+      whoami.textContent = `Not signed in — this guestbook is gated by ${data.gate}.`;
+      whoami.classList.add("whoami-anon");
+      submitBtn.disabled = true;
+    }
   } catch {
     $("platform").textContent = "offline";
   }
@@ -100,10 +134,12 @@ form.addEventListener("submit", async (event) => {
   showError("");
   submitBtn.disabled = true;
 
-  const payload = {
-    name: $("name").value,
-    body: bodyInput.value,
-  };
+  // When gated, don't send a name at all. The server overwrites it with the
+  // verified identity, so sending one would only invite the misconception that
+  // the client gets a say.
+  const payload = gated
+    ? { body: bodyInput.value }
+    : { name: $("name").value, body: bodyInput.value };
 
   try {
     const response = await fetch("/api/messages", {
@@ -129,5 +165,7 @@ bodyInput.addEventListener("input", () => {
   countEl.textContent = String(bodyInput.value.length);
 });
 
-loadPlatform();
+// Session first: it decides whether the name field is even shown, and we would
+// rather not flash an input that is about to disappear.
+await loadSession();
 loadMessages().catch((error) => showError(error.message));

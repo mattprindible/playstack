@@ -57,7 +57,12 @@ test("GET /api/health reports which platform answered", async () => {
   const response = await handler(new Request("https://x.dev/api/health"));
 
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { status: "ok", platform: "cloudflare" });
+  assert.deepEqual(await response.json(), {
+    status: "ok",
+    platform: "cloudflare",
+    gate: null,
+    identity: null,
+  });
 });
 
 test("GET /api/messages returns rows from PostgREST", async () => {
@@ -157,13 +162,135 @@ test("routes work when request.url is a bare path (the Vercel shape)", async () 
 
   const response = await handler(vercelStyle);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { status: "ok", platform: "vercel" });
+  assert.deepEqual(await response.json(), {
+    status: "ok",
+    platform: "vercel",
+    gate: null,
+    identity: null,
+  });
 
   const messages = await handler({
     url: "/api/messages?...path=messages",
     method: "GET",
   } as unknown as Request);
   assert.equal(messages.status, 200);
+});
+
+// ---------------------------------------------------------------------------
+// Gates. The same guestbook runs ungated, behind Cloudflare Access, or behind
+// ATProto OAuth — these tests pin down what changes and what must not.
+// ---------------------------------------------------------------------------
+
+function gateReturning(identity: { label: string; subject: string } | null) {
+  return { name: "test-gate", resolve: async () => identity };
+}
+
+const ADA = { label: "ada@example.com", subject: "user-123" };
+
+test("with no gate, health reports no gate and the client picks its own name", async () => {
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = createHandler({ env: TEST_ENV, fetch: stub.fetch, platform: "test" });
+
+  const health = await handler(new Request("https://x.dev/api/health"));
+  assert.deepEqual(await health.json(), {
+    status: "ok",
+    platform: "test",
+    gate: null,
+    identity: null,
+  });
+
+  await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ name: "Anyone", body: "hi" }),
+    }),
+  );
+  assert.equal(JSON.parse(String(stub.calls[0]?.init?.body)).name, "Anyone");
+});
+
+test("a gate that refuses blocks reads and writes with 401", async () => {
+  const stub = stubFetch({ body: [] });
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
+    platform: "test",
+    gate: gateReturning(null),
+  });
+
+  const read = await handler(new Request("https://x.dev/api/messages"));
+  assert.equal(read.status, 401);
+
+  const write = await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ name: "Mallory", body: "hi" }),
+    }),
+  );
+  assert.equal(write.status, 401);
+
+  assert.equal(stub.calls.length, 0, "an unauthenticated caller must not reach the database");
+});
+
+test("a verified identity OVERWRITES the client-supplied name", async () => {
+  // The security property of the whole gate: Mallory cannot sign as Ada.
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
+    platform: "test",
+    gate: gateReturning(ADA),
+  });
+
+  const response = await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ name: "Someone Else Entirely", body: "hi" }),
+    }),
+  );
+
+  assert.equal(response.status, 201);
+  const sent = JSON.parse(String(stub.calls[0]?.init?.body));
+  assert.equal(sent.name, ADA.label, "the gate's identity must win, not the request body");
+  assert.equal(sent.body, "hi");
+});
+
+test("health advertises the active gate and who you are", async () => {
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stubFetch({ body: [] }).fetch,
+    platform: "test",
+    gate: gateReturning(ADA),
+  });
+
+  const health = await handler(new Request("https://x.dev/api/health"));
+  assert.equal(health.status, 200, "health must stay reachable so the UI can adapt");
+  assert.deepEqual(await health.json(), {
+    status: "ok",
+    platform: "test",
+    gate: "test-gate",
+    identity: ADA.label,
+  });
+});
+
+test("an over-long verified label is truncated, not rejected", async () => {
+  const long = `${"a".repeat(80)}@example.com`;
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
+    platform: "test",
+    gate: gateReturning({ label: long, subject: "user-999" }),
+  });
+
+  const response = await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ body: "hi" }),
+    }),
+  );
+
+  assert.equal(response.status, 201, "a legitimate user must not be locked out by their address");
+  assert.equal(JSON.parse(String(stub.calls[0]?.init?.body)).name.length, LIMITS.nameMax);
 });
 
 test("validateNewMessage enforces the documented limits", () => {

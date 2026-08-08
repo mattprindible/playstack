@@ -3,7 +3,9 @@ export {
   createHandler,
   validateNewMessage,
   LIMITS,
+  type Gate,
   type HandlerDeps,
+  type Identity,
 } from "./handler.ts";
 export {
   listMessages,

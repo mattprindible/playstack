@@ -21,7 +21,10 @@
       </header>
 
       <form id="form" class="card" autocomplete="off">
-        <div class="field">
+        <!-- Shown only when a gate is active; the server decides who you are. -->
+        <p id="whoami" class="whoami" hidden></p>
+
+        <div class="field" id="name-field">
           <label for="name">Name</label>
           <input id="name" name="name" maxlength="50" required placeholder="Ada Lovelace" />
         </div>

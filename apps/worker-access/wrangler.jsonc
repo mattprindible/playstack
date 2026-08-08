@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "playstack-access",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // ===========================================================================
+  // THE MOST IMPORTANT LINE IN THIS FILE.
+  //
+  // Cloudflare Access protects a HOSTNAME, not a Worker. By default every
+  // Worker is also published at <name>.<subdomain>.workers.dev — and that
+  // hostname is NOT covered by the Access policy attached to
+  // playstack.haha.computer.
+  //
+  // Leave this on and your carefully gated app has a public back door that
+  // never appears in the Access dashboard. Turning it off means the custom
+  // domain is the only way in.
+  // ===========================================================================
+  "workers_dev": false,
+
+  // custom_domain: true makes wrangler create the DNS record and the route
+  // together, so there is no window where the hostname resolves to nothing.
+  "routes": [
+    {
+      "pattern": "playstack.haha.computer",
+      "custom_domain": true
+    }
+  ],
+
+  // Same static frontend as every other variant. app.js asks /api/health which
+  // gate is active and adapts itself.
+  "assets": {
+    "directory": "../web/public"
+  },
+
+  // Not secrets — the team domain is in every login URL and the AUD tag is a
+  // public identifier. They are vars so they are reviewable in git; the
+  // security comes from the JWT signature, not from hiding these.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "REPLACE_ME",
+    "ACCESS_AUD": "REPLACE_ME"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

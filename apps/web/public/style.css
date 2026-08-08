@@ -62,6 +62,19 @@ main { max-width: 42rem; margin: 0 auto; }
 
 .field { margin-bottom: 1rem; }
 
+/* Shown only when an auth gate is active. */
+.whoami {
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.whoami-anon { color: var(--danger); border-color: currentColor; }
+
 label {
   display: block;
   font-size: 0.8rem;
