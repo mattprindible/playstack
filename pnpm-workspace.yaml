@@ -28,6 +28,28 @@ minimumReleaseAge: 1440
 # corepack and for CI.
 managePackageManagerVersions: false
 
+# ---------------------------------------------------------------------------
+# pnpm's default "isolated" linker fills node_modules with SYMLINKS into a
+# central store. It is pnpm's best feature and Vercel cannot cope with it:
+# `vercel deploy --prebuilt` walks the traced files, meets a symlink pointing
+# outside the project, and fails with
+#     File does not exist: "apps/web/node_modules/jose"
+# even though the package is installed and the build succeeded.
+#
+# "hoisted" produces a flat, npm-shaped node_modules of real directories.
+#
+# WHAT THIS COSTS: strictness. With symlinks, importing a package you did not
+# declare is an error; hoisted makes "phantom dependencies" silently work, so a
+# missing entry in package.json can go unnoticed until it breaks elsewhere.
+#
+# WHAT THIS DOES NOT COST: anything supply-chain related. The lockfile,
+# minimumReleaseAge, and the allowBuilds script allow-list are all unaffected,
+# and the content-addressable store still de-duplicates via hard links.
+#
+# Revisit if Vercel ever learns to follow symlinks.
+# ---------------------------------------------------------------------------
+nodeLinker: hoisted
+
 # Lockfile is the source of truth. CI uses --frozen-lockfile so a compromised
 # or drifted registry cannot quietly change what gets installed.
 resolutionMode: highest

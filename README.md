@@ -94,6 +94,72 @@ win.
 
 ---
 
+## Three ways to gate the same guestbook
+
+The app logic never changes. `packages/core` takes an optional `Gate` — resolve
+a request to a verified identity, or refuse — and everything else follows.
+
+| Variant | Where | Who gets in | Auth code you own |
+| --- | --- | --- | --- |
+| Public | Worker + Vercel | anyone | none |
+| **Cloudflare Access** | `playstack.haha.computer` | emails on a list, via one-time PIN | ~40 lines, all verification |
+| **ATProto OAuth** | Vercel | anyone with an ATProto handle | the OAuth client wiring |
+
+When a gate is active the server **overwrites** the submitted name with the
+verified identity, so nobody can sign as somebody else. That property has its
+own test.
+
+**Access is the striking one.** For a fixed group of friends there is no signup
+form, no password, no session table, no reset email — you list addresses in a
+policy and Cloudflare authenticates at the edge before your Worker runs. The
+best auth implementation is the one you didn't write.
+
+Two things that setup teaches:
+
+- `workers_dev: false` is load-bearing. **Access protects a hostname, not a
+  Worker.** Leave the `.workers.dev` route on and your gated app has a public
+  back door that never appears in the Access dashboard.
+- The Worker verifies the Access JWT itself — issuer *and* audience. Without
+  the audience check, a token minted for any other app in your account would be
+  accepted. A gate you didn't verify is a gate someone can walk around.
+
+**ATProto is where "collapse everything onto Cloudflare" breaks.** The official
+`@atproto/oauth-client-node` does not run on Workers
+([issue #3292](https://github.com/bluesky-social/atproto/issues/3292), still
+open: no `cache: 'no-cache'`, no `redirect: 'error'`, no DNS for handle
+resolution). A community Workers port exists but was ~11 months stale with a
+single maintainer — not what you want holding your auth. So the OAuth leg runs
+on Vercel with official code, and the Worker stays the app. **That is the
+concrete reason both runtimes still exist.**
+
+Its data model is worth copying:
+
+- ATProto tokens and DPoP keys live in Supabase behind `service_role`, in tables
+  that are **both** `REVOKE`d from anon **and** RLS-enabled with zero policies.
+  Two independent locks, so one mistake isn't enough. `audit-rls` verifies it.
+- The browser never receives an ATProto token — only a signed httpOnly cookie
+  carrying `did` + `handle`. A Worker can verify that cookie without ever
+  holding a refresh token, exactly like the Access gate.
+- The DID is the identity; the handle is display only, because handles can be
+  reassigned.
+
+### Read the graph, or index the network?
+
+`/api/atproto/me` exists to make this concrete. Reading the signed-in user's own
+profile and follows — and writing to their own PDS — costs **one authenticated
+request and zero storage of your own**. A Worker and a cookie is a complete
+backend for that.
+
+Asking "what did my follows post about X" has no equivalent endpoint. You would
+consume the firehose (or Jetstream), store what streams past, and keep it fresh
+forever — an always-on service with real cost.
+
+So the question that decides your architecture is not "do I need auth." It is:
+**does this app act for one signed-in user, or answer questions about the
+network?**
+
+---
+
 ## What actually broke (the useful part)
 
 Everything above sounds tidy. It was not. Cloudflare and Supabase deployed
@@ -136,6 +202,17 @@ waited for a `res.end()` that a returned `Response` never triggers. **The
 symptom was not an error but a hang**, up to the 300-second timeout, which looks
 identical to a network problem. `apps/web/api/[...path].ts` now does the
 Node→Web conversion explicitly.
+
+**6. pnpm's symlinks break `vercel deploy --prebuilt`.** pnpm's isolated linker
+is its best feature and Vercel cannot follow it: the deploy walks traced files,
+hits a symlink pointing outside the project, and dies with
+`File does not exist: "apps/web/node_modules/jose"` — though the package is
+installed and the build succeeded. Fixed with `nodeLinker: hoisted`.
+
+What that costs is *strictness*: hoisting makes phantom dependencies silently
+work, so a package missing from `package.json` can go unnoticed. What it does
+**not** cost is anything supply-chain related — the lockfile, `minimumReleaseAge`
+and the `allowBuilds` allow-list are all unaffected.
 
 Two smaller ones worth knowing:
 
