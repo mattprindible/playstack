@@ -13,7 +13,7 @@ requires-python = ">=3.13"
 # insert now needs an ES256 token minted from the project signing key, and
 # hand-rolling that encoding in Python to save a dependency would be exactly
 # the wrong trade.
-dependencies = ["httpx>=0.28", "pyjwt[crypto]>=2.10"]
+dependencies = ["httpx>=0.28", "pyjwt[crypto]>=2.13.0"]
 
 [project.scripts]
 playstack-ops = "playstack_ops.cli:main"
