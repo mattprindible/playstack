@@ -21,6 +21,21 @@ const COOKIE_NAME = "playstack_session";
 const ISSUER = "playstack";
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
+/**
+ * Binds the cookie to THIS deployment.
+ *
+ * Without an audience, the issuer is the constant "playstack", so the moment
+ * you copy this file into another project and reuse a SESSION_SECRET, cookies
+ * mint in one app and verify in the other. Deriving the audience from
+ * PUBLIC_ORIGIN makes that impossible without anyone having to remember.
+ *
+ * Same reasoning as the ACCESS_AUD check in apps/worker-access: a signature
+ * proves who made the token, never who it was made FOR.
+ */
+function audience(): string {
+  return process.env.PUBLIC_ORIGIN?.trim().replace(/\/+$/, "") || "playstack-local";
+}
+
 export type AppSession = {
   did: string;
   handle: string;
@@ -41,6 +56,7 @@ export async function createSessionCookie(session: AppSession): Promise<string> 
   const token = await new SignJWT({ handle: session.handle })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(ISSUER)
+    .setAudience(audience())
     .setSubject(session.did) // DID is the identity; the handle can change
     .setIssuedAt()
     .setExpirationTime(`${MAX_AGE_SECONDS}s`)
@@ -80,7 +96,10 @@ export async function verifySessionCookie(
   if (!token) return null;
 
   try {
-    const { payload } = await jwtVerify(token, secret(), { issuer: ISSUER });
+    const { payload } = await jwtVerify(token, secret(), {
+      issuer: ISSUER,
+      audience: audience(),
+    });
     const did = payload.sub;
     const handle = payload.handle;
 

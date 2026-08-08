@@ -75,6 +75,22 @@ main { max-width: 42rem; margin: 0 auto; }
 
 .whoami-anon { color: var(--danger); border-color: currentColor; }
 
+/* A button that reads as a link: signing out is an action, not navigation, so
+   it has to be a <button>, but it should not compete with the submit button. */
+.linklike {
+  margin: -0.5rem 0 1rem;
+  padding: 0;
+  width: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linklike:hover { color: var(--fg); }
+
 .row { display: flex; gap: 0.5rem; }
 .row input { flex: 1; }
 .row button { white-space: nowrap; }

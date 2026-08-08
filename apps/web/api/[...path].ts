@@ -8,8 +8,8 @@
  * single most useful thing this repo has to teach about the two platforms:
  *
  *   Cloudflare Workers are Web-standard NATIVELY. `fetch(request, env)` hands
- *   you a real `Request` and takes a real `Response` back. apps/worker/src/
- *   index.ts needs no adapter at all.
+ *   you a real `Request` and takes a real `Response` back.
+ *   apps/worker-access/src/index.ts needs no adapter at all.
  *
  *   Vercel Functions on the Node runtime use Node's classic (req, res) pair.
  *   Vercel can serve Web-standard handlers too, but it decides which style you
@@ -27,31 +27,43 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-// NOTE: imported by relative path, while apps/worker/src/index.ts imports the
-// same module as the workspace package "@playstack/core". That asymmetry works
+// NOTE: imported by relative path, while apps/worker-access/src/index.ts
+// imports it as the workspace package "@playstack/core". That asymmetry works
 // around a real Vercel limitation: pnpm links a workspace dependency as a
 // symlink pointing outside the consuming package, and Vercel's builder records
 // that symlink in the function's `filePathMap` without ever uploading it. The
 // deploy then fails with "File does not exist:
 // apps/web/node_modules/@playstack/core" even though the bundle already holds
 // every compiled file. A relative path sidesteps node resolution entirely.
-import { createHandler, readEnv, type Gate } from "../../../packages/core/src/index.ts";
+import {
+  createHandler,
+  readEnv,
+  readSigningKey,
+  type Gate,
+} from "../../../packages/core/src/index.ts";
 import { verifySessionCookie } from "../lib/atproto/session.ts";
 
 /**
  * The ATProto gate — prototype B.
  *
- * Opt-in via ATPROTO_GATE=on. Absent, this deployment stays the public
- * guestbook, which is the app's ordinary state rather than a security failure
- * (contrast apps/worker-access, where a missing config means the gate is
- * broken and it refuses to serve).
- *
  * Note how little happens here: verify our own signed cookie, read the DID and
  * handle out of it, done. No token refresh, no PDS call, no database. The
  * expensive parts of ATProto auth all happened once at /api/atproto/callback.
  */
-function atprotoGate(): Gate | undefined {
-  if (process.env.ATPROTO_GATE?.trim() !== "on") return undefined;
+function atprotoGate(): Gate {
+  // FAIL CLOSED, matching apps/worker-access.
+  //
+  // This used to read `if (ATPROTO_GATE !== "on") return undefined`, and an
+  // undefined gate meant the deployment quietly served an ungated guestbook.
+  // That is the worst possible default: unsetting one environment variable
+  // silently removed all authentication, and nothing in the response said so.
+  // Now a missing flag is a configuration error that stops the deploy dead.
+  if (process.env.ATPROTO_GATE?.trim() !== "on") {
+    throw new Error(
+      "ATPROTO_GATE must be 'on'. This deployment has no ungated mode — " +
+        "refusing to serve rather than silently dropping authentication.",
+    );
+  }
 
   return {
     name: "atproto",
@@ -72,13 +84,15 @@ function atprotoGate(): Gate | undefined {
 //
 // On Vercel, configuration arrives as ambient `process.env`. On Cloudflare it
 // is passed into fetch(). That difference is the entire reason readEnv exists.
-const gate = atprotoGate();
-
+// Top-level await: readSigningKey imports the JWK, which is async. Doing it
+// once at module load keeps it off the request path, and a bad key fails the
+// cold start loudly instead of 500ing every insert later.
 const handler = createHandler({
   env: readEnv(process.env),
   fetch: globalThis.fetch,
-  platform: gate ? "vercel (atproto)" : "vercel",
-  gate,
+  platform: "vercel (atproto)",
+  gate: atprotoGate(),
+  signingKey: await readSigningKey(process.env),
 });
 
 /** Headers Node manages itself; forwarding them corrupts the Request. */

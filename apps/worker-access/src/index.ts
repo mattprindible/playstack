@@ -30,16 +30,56 @@
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
-import { createHandler, readEnv, type Gate, type Identity } from "@playstack/core";
+import { createHandler, readEnv, readSigningKey, type Gate, type Identity } from "@playstack/core";
 
 type WorkerEnv = {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
+  /** Signs the per-caller token PostgREST evaluates. See packages/core/src/token.ts. */
+  SUPABASE_JWT_KID?: string;
+  SUPABASE_JWT_PRIVATE_KEY?: string;
   /** Your Zero Trust team name, e.g. "mattprindible" => mattprindible.cloudflareaccess.com */
   ACCESS_TEAM_DOMAIN?: string;
   /** The Access application's AUD tag. Pins the token to THIS app. */
   ACCESS_AUD?: string;
+  /** Configured in wrangler.jsonc. Absent under `wrangler dev` on old versions. */
+  API_RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> };
+  /** The static frontend. `run_worker_first` routes everything here first. */
+  ASSETS: { fetch: (request: Request) => Promise<Response> };
 };
+
+/**
+ * Security headers, applied to EVERY response this Worker returns.
+ *
+ * The Vercel deployment gets the equivalent from apps/web/vercel.json. Keeping
+ * the two in step by hand is the honest cost of serving one frontend from two
+ * platforms — and for a while nobody was paying it: vercel.json set headers and
+ * the Cloudflare side set none at all. Same app, same code, two different
+ * security postures, and no way to notice by looking at either site.
+ *
+ * The CSP is strict because this app earns it: no inline scripts, no inline
+ * styles, no external anything. `data:` for images is the one exception, which
+ * the emoji favicon in index.html needs.
+ */
+const SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+    "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "x-frame-options": "DENY",
+  "permissions-policy": "geolocation=(), microphone=(), camera=(), payment=()",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+};
+
+function secured(response: Response): Response {
+  // Response headers are immutable once constructed, so clone to modify.
+  const out = new Response(response.body, response);
+  for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
+    out.headers.set(key, value);
+  }
+  return out;
+}
 
 /**
  * JWKS fetching is cached across requests within an isolate. Rebuilding it per
@@ -128,26 +168,72 @@ export default {
     // than quietly serving an ungated guestbook. An app that silently loses
     // its authentication is far worse than one that is visibly broken.
     if (!teamDomain || !aud || teamDomain === "REPLACE_ME" || aud === "REPLACE_ME") {
-      return configError(
-        "Access gate not configured: set ACCESS_TEAM_DOMAIN and ACCESS_AUD. " +
-          "Refusing to serve ungated.",
+      return secured(
+        configError(
+          "Access gate not configured: set ACCESS_TEAM_DOMAIN and ACCESS_AUD. " +
+            "Refusing to serve ungated.",
+        ),
       );
     }
+
+    // Rate limit before doing any work, keyed on the caller's IP.
+    //
+    // Access sits in front of this, so a stranger never gets here — this is the
+    // backstop for a signed-in friend's runaway script, and for the case where
+    // some future route is reachable without Access. Only /api/* is limited:
+    // rate-limiting the stylesheet would just break the page under load.
+    const url = new URL(request.url);
+    if (env.API_RATE_LIMITER && url.pathname.startsWith("/api/")) {
+      const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+      const { success } = await env.API_RATE_LIMITER.limit({ key: ip });
+      if (!success) {
+        return secured(
+          new Response(JSON.stringify({ error: "Too many requests" }), {
+            status: 429,
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              // Tell a well-behaved client when to come back rather than making
+              // it guess. `period` in wrangler.jsonc is 60s.
+              "retry-after": "60",
+            },
+          }),
+        );
+      }
+    }
+
+    // Everything that is not the API is the static frontend. `run_worker_first`
+    // means those requests arrive here rather than being served behind our
+    // back, which is the only way they can pick up the security headers.
+    if (!url.pathname.startsWith("/api/")) {
+      return secured(await env.ASSETS.fetch(request));
+    }
+
+    // Only the string-valued configuration, passed explicitly. `env` also
+    // carries the rate limiter BINDING, which is an object — handing the whole
+    // bag to a function expecting `Record<string, string>` stops type-checking
+    // the moment a non-string binding is added, which is exactly what happened.
+    const config = {
+      SUPABASE_URL: env.SUPABASE_URL,
+      SUPABASE_ANON_KEY: env.SUPABASE_ANON_KEY,
+      SUPABASE_JWT_KID: env.SUPABASE_JWT_KID,
+      SUPABASE_JWT_PRIVATE_KEY: env.SUPABASE_JWT_PRIVATE_KEY,
+    };
 
     let handler: (request: Request) => Promise<Response>;
     try {
       handler = createHandler({
-        env: readEnv(env),
+        env: readEnv(config),
         fetch: globalThis.fetch,
         platform: "cloudflare-access",
         gate: createAccessGate(teamDomain, aud),
+        signingKey: await readSigningKey(config),
       });
     } catch (error) {
-      return configError(
-        error instanceof Error ? error.message : "Worker is misconfigured",
+      return secured(
+        configError(error instanceof Error ? error.message : "Worker is misconfigured"),
       );
     }
 
-    return handler(request);
+    return secured(await handler(request));
   },
 };

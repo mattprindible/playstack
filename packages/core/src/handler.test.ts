@@ -14,13 +14,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { generateKeyPair, exportJWK, jwtVerify } from "jose";
+
 import { createHandler, validateNewMessage, LIMITS } from "./handler.ts";
+import { readSigningKey, type SigningKey } from "./token.ts";
 import type { Env } from "./env.ts";
 import type { FetchLike, Message } from "./supabase.ts";
 
 const TEST_ENV: Env = {
   SUPABASE_URL: "https://example.supabase.co",
   SUPABASE_ANON_KEY: "test-anon-key",
+};
+
+/**
+ * A throwaway ES256 keypair, generated per test run. Real key material never
+ * goes near the test suite, and we keep the public half so tests can VERIFY
+ * the tokens the handler mints rather than taking their contents on trust.
+ */
+const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+const TEST_KEY: SigningKey = {
+  kid: "test-kid",
+  alg: "ES256",
+  privateKey,
 };
 
 const SAMPLE: Message = {
@@ -48,11 +63,28 @@ function stubFetch(
   return { fetch: fetchImpl, calls };
 }
 
-function handlerWith(stub: { fetch: FetchLike }, platform = "test") {
-  return createHandler({ env: TEST_ENV, fetch: stub.fetch, platform });
+const ADA = { label: "ada@example.com", subject: "user-123" };
+
+function gateReturning(identity: { label: string; subject: string } | null) {
+  return { name: "test-gate", resolve: async () => identity };
 }
 
-test("GET /api/health reports which platform answered", async () => {
+/**
+ * Every handler needs a gate — `HandlerDeps.gate` is not optional, so there is
+ * no ungated handler to construct even in a test. The default here admits a
+ * known user so the tests below can exercise the ordinary path.
+ */
+function handlerWith(stub: { fetch: FetchLike }, platform = "test") {
+  return createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
+    platform,
+    gate: gateReturning(ADA),
+    signingKey: TEST_KEY,
+  });
+}
+
+test("GET /api/health reports which platform answered and which gate is active", async () => {
   const handler = handlerWith(stubFetch({ body: [] }), "cloudflare");
   const response = await handler(new Request("https://x.dev/api/health"));
 
@@ -60,8 +92,8 @@ test("GET /api/health reports which platform answered", async () => {
   assert.deepEqual(await response.json(), {
     status: "ok",
     platform: "cloudflare",
-    gate: null,
-    identity: null,
+    gate: "test-gate",
+    identity: ADA.label,
   });
 });
 
@@ -86,9 +118,141 @@ test("GET /api/messages sends the auth headers RLS depends on", async () => {
   assert.ok(call.url.startsWith("https://example.supabase.co/rest/v1/messages"));
   assert.match(call.url, /order=created_at\.desc/);
 
+  // The two headers do different jobs: apikey identifies the project, while
+  // Authorization carries the minted per-caller token RLS actually evaluates.
+  // They used to be the same value; that they now differ is the whole change.
   const headers = call.init?.headers as Record<string, string>;
   assert.equal(headers.apikey, "test-anon-key");
-  assert.equal(headers.Authorization, "Bearer test-anon-key");
+  assert.notEqual(
+    headers.Authorization,
+    "Bearer test-anon-key",
+    "the anon key must no longer be used as the bearer token",
+  );
+});
+
+test("subject and gate are never exposed to the browser", async () => {
+  const stub = stubFetch({ body: [] });
+  const handler = handlerWith(stub);
+
+  await handler(new Request("https://x.dev/api/messages"));
+
+  const select = new URL(String(stub.calls[0]?.url)).searchParams.get("select");
+  assert.equal(select, "id,name,body,created_at");
+  assert.doesNotMatch(select ?? "", /subject/, "the stable identity must stay server-side");
+});
+
+// ---------------------------------------------------------------------------
+// The minted token. These assertions are the client-side half of the RLS
+// policy in supabase/migrations/…_attributed_messages.sql — if they drift
+// apart, every insert is rejected by the database.
+// ---------------------------------------------------------------------------
+
+async function claimsFrom(stub: { calls: Call[] }) {
+  const headers = stub.calls[0]?.init?.headers as Record<string, string>;
+  const token = String(headers.Authorization).replace(/^Bearer /, "");
+  const { payload, protectedHeader } = await jwtVerify(token, publicKey);
+  return { payload, protectedHeader };
+}
+
+test("the minted token carries exactly the claims the RLS policy checks", async () => {
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = handlerWith(stub);
+
+  await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ body: "hi" }),
+    }),
+  );
+
+  const { payload, protectedHeader } = await claimsFrom(stub);
+
+  assert.equal(protectedHeader.alg, "ES256");
+  assert.equal(protectedHeader.kid, "test-kid", "kid is how Supabase finds the public key");
+
+  assert.equal(payload.role, "authenticated", "PostgREST switches role on this claim");
+  assert.equal(payload.sub, ADA.subject, "sub is the stable identity, not the label");
+  assert.equal(payload.gate, "test-gate");
+  assert.equal(payload.label, ADA.label);
+
+  // Short-lived by design: minted per request, used once, never sent to a browser.
+  const ttl = (payload.exp ?? 0) - (payload.iat ?? 0);
+  assert.ok(ttl > 0 && ttl <= 120, `expected a short TTL, got ${ttl}s`);
+});
+
+test("the inserted row carries the attribution the database will verify", async () => {
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = handlerWith(stub);
+
+  await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ name: "Someone Else Entirely", body: "hi" }),
+    }),
+  );
+
+  const sent = JSON.parse(String(stub.calls[0]?.init?.body));
+  const { payload } = await claimsFrom(stub);
+
+  // Each of these is compared against the token by the insert policy. The row
+  // and the token have to agree, or Postgres refuses the write.
+  assert.equal(sent.subject, payload.sub);
+  assert.equal(sent.gate, payload.gate);
+  assert.equal(sent.name, payload.label);
+  assert.equal(sent.name, ADA.label, "the client-supplied name must be discarded");
+});
+
+test("a long identity is truncated the same way the SQL policy truncates it", async () => {
+  // The policy is `name = left(auth.jwt() ->> 'label', 50)`. If this slice and
+  // that left() ever disagree, every insert from a long-handled user is
+  // rejected by RLS — a failure that looks like a database bug and is not.
+  const long = `${"a".repeat(80)}@example.com`;
+  const stub = stubFetch({ status: 201, body: [SAMPLE] });
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
+    platform: "test",
+    gate: gateReturning({ label: long, subject: "user-999" }),
+    signingKey: TEST_KEY,
+  });
+
+  await handler(
+    new Request("https://x.dev/api/messages", {
+      method: "POST",
+      body: JSON.stringify({ body: "hi" }),
+    }),
+  );
+
+  const sent = JSON.parse(String(stub.calls[0]?.init?.body));
+  const { payload } = await claimsFrom(stub);
+
+  assert.equal(sent.name.length, LIMITS.nameMax);
+  assert.equal(
+    sent.name,
+    String(payload.label).slice(0, LIMITS.nameMax),
+    "row name must equal left(label, 50) or RLS rejects the insert",
+  );
+});
+
+test("readSigningKey rejects an incomplete or malformed key", async () => {
+  const jwk = await exportJWK(privateKey);
+
+  await assert.rejects(
+    () => readSigningKey({ SUPABASE_JWT_KID: "k" }),
+    /SUPABASE_JWT_PRIVATE_KEY/,
+    "a missing key must name itself, not fail later as a bad signature",
+  );
+  await assert.rejects(
+    () => readSigningKey({ SUPABASE_JWT_KID: "k", SUPABASE_JWT_PRIVATE_KEY: "not json" }),
+    /JSON Web Key/,
+  );
+
+  const ok = await readSigningKey({
+    SUPABASE_JWT_KID: "k",
+    SUPABASE_JWT_PRIVATE_KEY: JSON.stringify({ ...jwk, alg: "ES256" }),
+  });
+  assert.equal(ok.kid, "k");
+  assert.equal(ok.alg, "ES256");
 });
 
 test("POST /api/messages creates a message and returns 201", async () => {
@@ -132,17 +296,54 @@ test("upstream failures preserve their status code", async () => {
   assert.equal(response.status, 401, "an RLS rejection must not become a 500");
 });
 
-test("unknown routes 404 and preflight succeeds", async () => {
+test("unknown routes 404 and OPTIONS advertises the allowed methods", async () => {
   const handler = handlerWith(stubFetch({ body: [] }));
 
   const missing = await handler(new Request("https://x.dev/nope"));
   assert.equal(missing.status, 404);
 
-  const preflight = await handler(
+  const options = await handler(
     new Request("https://x.dev/api/messages", { method: "OPTIONS" }),
   );
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.equal(options.status, 204);
+  assert.equal(options.headers.get("allow"), "GET,POST,OPTIONS");
+});
+
+test("no response carries CORS headers", async () => {
+  // This API is same-origin only. A wildcard ACAO bought nothing and sat one
+  // line away from a CSRF hole, so it is gone — and stays gone.
+  const handler = handlerWith(stubFetch({ body: [] }));
+
+  for (const request of [
+    new Request("https://x.dev/api/health"),
+    new Request("https://x.dev/api/messages"),
+    new Request("https://x.dev/api/messages", { method: "OPTIONS" }),
+    new Request("https://x.dev/nope"),
+  ]) {
+    const response = await handler(request);
+    assert.equal(
+      response.headers.get("access-control-allow-origin"),
+      null,
+      `${request.method} ${new URL(request.url).pathname} must not allow cross-origin reads`,
+    );
+    assert.equal(response.headers.get("access-control-allow-credentials"), null);
+  }
+});
+
+test("upstream error detail never reaches the caller", async () => {
+  // PostgREST names tables, columns and constraints in its errors. That is
+  // free reconnaissance for a stranger and useless to a legitimate client.
+  const leaky = 'relation "public.messages" violates constraint "messages_name_length"';
+  const stub = stubFetch({ status: 403, body: { message: leaky, hint: "check your policy" } });
+  const handler = handlerWith(stub);
+
+  const response = await handler(new Request("https://x.dev/api/messages"));
+  const body = JSON.stringify(await response.json());
+
+  assert.equal(response.status, 403, "the status stays honest so clients can react");
+  assert.doesNotMatch(body, /messages_name_length/, "constraint names must not leak");
+  assert.doesNotMatch(body, /relation/, "schema detail must not leak");
+  assert.doesNotMatch(body, /policy/, "policy detail must not leak");
 });
 
 test("routes work when request.url is a bare path (the Vercel shape)", async () => {
@@ -165,8 +366,8 @@ test("routes work when request.url is a bare path (the Vercel shape)", async () 
   assert.deepEqual(await response.json(), {
     status: "ok",
     platform: "vercel",
-    gate: null,
-    identity: null,
+    gate: "test-gate",
+    identity: ADA.label,
   });
 
   const messages = await handler({
@@ -177,35 +378,37 @@ test("routes work when request.url is a bare path (the Vercel shape)", async () 
 });
 
 // ---------------------------------------------------------------------------
-// Gates. The same guestbook runs ungated, behind Cloudflare Access, or behind
-// ATProto OAuth — these tests pin down what changes and what must not.
+// Gates. The guestbook runs behind Cloudflare Access or behind ATProto OAuth —
+// these tests pin down what changes between them and what must not.
+//
+// There is deliberately no "ungated" case. `HandlerDeps.gate` is required, so
+// the ungated handler these tests used to cover cannot be constructed at all;
+// the check now happens at compile time, which is the only place it cannot be
+// skipped in a hurry.
 // ---------------------------------------------------------------------------
 
-function gateReturning(identity: { label: string; subject: string } | null) {
-  return { name: "test-gate", resolve: async () => identity };
-}
-
-const ADA = { label: "ada@example.com", subject: "user-123" };
-
-test("with no gate, health reports no gate and the client picks its own name", async () => {
-  const stub = stubFetch({ status: 201, body: [SAMPLE] });
-  const handler = createHandler({ env: TEST_ENV, fetch: stub.fetch, platform: "test" });
-
-  const health = await handler(new Request("https://x.dev/api/health"));
-  assert.deepEqual(await health.json(), {
-    status: "ok",
+test("no route reaches the database without the gate's approval", async () => {
+  // The gate is consulted BEFORE any method-specific work, so a refusal costs
+  // nothing downstream. This is the property that makes an unauthenticated
+  // flood cheap to absorb: it never becomes database load.
+  const stub = stubFetch({ body: [] });
+  const handler = createHandler({
+    env: TEST_ENV,
+    fetch: stub.fetch,
     platform: "test",
-    gate: null,
-    identity: null,
+    signingKey: TEST_KEY,
+    gate: gateReturning(null),
   });
 
-  await handler(
-    new Request("https://x.dev/api/messages", {
-      method: "POST",
-      body: JSON.stringify({ name: "Anyone", body: "hi" }),
-    }),
-  );
-  assert.equal(JSON.parse(String(stub.calls[0]?.init?.body)).name, "Anyone");
+  for (const request of [
+    new Request("https://x.dev/api/messages"),
+    new Request("https://x.dev/api/messages", { method: "POST", body: "{}" }),
+    new Request("https://x.dev/api/messages", { method: "DELETE" }),
+  ]) {
+    assert.equal((await handler(request)).status, 401);
+  }
+
+  assert.equal(stub.calls.length, 0, "an unauthenticated caller must not reach the database");
 });
 
 test("a gate that refuses blocks reads and writes with 401", async () => {
@@ -214,6 +417,7 @@ test("a gate that refuses blocks reads and writes with 401", async () => {
     env: TEST_ENV,
     fetch: stub.fetch,
     platform: "test",
+    signingKey: TEST_KEY,
     gate: gateReturning(null),
   });
 
@@ -238,6 +442,7 @@ test("a verified identity OVERWRITES the client-supplied name", async () => {
     env: TEST_ENV,
     fetch: stub.fetch,
     platform: "test",
+    signingKey: TEST_KEY,
     gate: gateReturning(ADA),
   });
 
@@ -260,6 +465,7 @@ test("health advertises the active gate and who you are", async () => {
     fetch: stubFetch({ body: [] }).fetch,
     platform: "test",
     gate: gateReturning(ADA),
+    signingKey: TEST_KEY,
   });
 
   const health = await handler(new Request("https://x.dev/api/health"));
@@ -279,6 +485,7 @@ test("an over-long verified label is truncated, not rejected", async () => {
     env: TEST_ENV,
     fetch: stub.fetch,
     platform: "test",
+    signingKey: TEST_KEY,
     gate: gateReturning({ label: long, subject: "user-999" }),
   });
 

@@ -1,0 +1,40 @@
+# Dependency updates.
+#
+# The gap this closes: nothing in the repo told you when a dependency went bad.
+# Lockfiles guarantee you install exactly what you committed, which is the
+# right property — and it also means a vulnerable version stays pinned
+# indefinitely unless something nudges you.
+#
+# `github-actions` is listed first on purpose. The workflow pins actions by tag
+# (`actions/checkout@v5`), and a tag is mutable — whoever controls the repo can
+# repoint it. Pinning by commit SHA is stricter, and unreadable to maintain by
+# hand; Dependabot updating SHAs for you is what makes that trade affordable.
+# Until then, tags plus prompt updates is the reasonable middle.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR for everything non-major. A hobby repo does not want six PRs a
+    # week, and reviewing them individually is how you stop reviewing them.
+    groups:
+      all-minor-and-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: uv
+    directory: /tools
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"

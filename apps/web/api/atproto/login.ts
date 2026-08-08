@@ -10,6 +10,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { getOAuthClient } from "../../lib/atproto/client.ts";
+import { sweepExpiredStates } from "../../lib/atproto/store.ts";
 
 function fail(res: ServerResponse, status: number, message: string): void {
   res.statusCode = status;
@@ -27,6 +28,11 @@ export default async function handler(
   if (!handle) {
     return fail(res, 400, "Provide ?handle= (for example: san.haha.computer)");
   }
+
+  // This endpoint is unauthenticated and writes a row per call, so it sweeps
+  // before it adds. Not awaited: housekeeping must not sit in front of a
+  // visitor's login.
+  void sweepExpiredStates();
 
   try {
     // authorize() does the heavy lifting: resolve handle -> DID -> PDS,

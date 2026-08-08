@@ -7,17 +7,22 @@ a real deploy on every platform's free tier.
 The app is a guestbook: one table, one form, one list. It is trivial on purpose.
 Everything worth learning here is the wiring around it.
 
-**Live — three deployments, one commit, one shared handler:**
+**Live — two deployments, one commit, one shared handler:**
 
 | Host | Gate | URL |
 | --- | --- | --- |
-| Cloudflare | none | https://playstack.service-cloudflare-442.workers.dev |
 | Cloudflare | email + PIN | https://playstack.haha.computer |
 | Vercel | ATProto OAuth | https://playstack-nine.vercel.app |
 
-All three serve the same static frontend, run the same handler, and read and
-write the same Supabase database. Hit `/api/health` on any of them and it tells
-you which host answered and which gate is in front.
+Both serve the same static frontend, run the same handler, and read and write
+the same Supabase database. Hit `/api/health` on either and it tells you which
+host answered and which gate is in front.
+
+**Every deployment is gated, and that is enforced by the type system** —
+`HandlerDeps.gate` is required, so an ungated build does not compile. There
+used to be a third, ungated deployment; [why it was
+deleted](#why-the-ungated-deployment-was-deleted) is the most useful security
+lesson in this repo.
 
 ---
 
@@ -38,8 +43,8 @@ So this repo writes the API *once* and runs it on *both*:
                                 │
              ┌──────────────────┴──────────────────┐
              ▼                                     ▼
-   apps/web/api/[...path].ts            apps/worker/src/index.ts
-   ~5 lines of glue                     ~10 lines of glue
+   apps/web/api/[...path].ts        apps/worker-access/src/index.ts
+   ~100 lines of glue               ~40 lines, all verification
              │                                     │
              ▼                                     ▼
       ┌─────────────┐                       ┌─────────────┐
@@ -96,20 +101,25 @@ win.
 
 ---
 
-## Three ways to gate the same guestbook
+## Two ways to gate the same guestbook
 
-The app logic never changes. `packages/core` takes an optional `Gate` — resolve
-a request to a verified identity, or refuse — and everything else follows.
+The app logic never changes. `packages/core` takes a **required** `Gate` —
+resolve a request to a verified identity, or refuse — and everything else
+follows.
 
 | Variant | Where | Who gets in | Auth code you own |
 | --- | --- | --- | --- |
-| Public | Worker + Vercel | anyone | none |
 | **Cloudflare Access** | `playstack.haha.computer` | emails on a list, via one-time PIN | ~40 lines, all verification |
 | **ATProto OAuth** | Vercel | anyone with an ATProto handle | the OAuth client wiring |
 
-When a gate is active the server **overwrites** the submitted name with the
-verified identity, so nobody can sign as somebody else. That property has its
-own test.
+The server **overwrites** the submitted name with the verified identity, so
+nobody can sign as somebody else. That property has its own test. There is no
+name input in the frontend at all — an editable field whose value is always
+discarded would be a small lie about how the app works.
+
+Both entrypoints **fail closed**: missing gate configuration produces a 503 or a
+failed cold start, never a quietly-ungated app. Losing your authentication
+silently is far worse than being visibly broken.
 
 **Access is the striking one.** For a fixed group of friends there is no signup
 form, no password, no session table, no reset email — you list addresses in a
@@ -162,14 +172,198 @@ network?**
 
 ---
 
+## Why the ungated deployment was deleted
+
+There used to be a third live deployment: a Worker with no gate at all, the
+original "just get something end to end" prototype. It shipped first, worked
+fine, and was quietly the biggest hole in the project.
+
+All three deployments shared one Supabase `messages` table, and its row-level
+policy said:
+
+```sql
+create policy "anyone may sign the guestbook"
+  on public.messages for insert
+  to anon, authenticated
+  with check (true);
+```
+
+So anyone on the internet could `POST` to the open Worker claiming to be
+`san.haha.computer`, and that entry appeared in **both gated guestbooks**,
+rendered identically to a genuinely verified one. The Access gate and the OAuth
+gate were each correct. They were also each irrelevant, because there was a
+third door into the same room.
+
+The general lesson, and the reason it is worth a section rather than a
+changelog line:
+
+> **Authenticating at the edge controls who reaches your code. It controls
+> nothing about your database unless the database is told.**
+
+Cloudflare Access, an OAuth handshake, a signed cookie — all of them gate
+*requests*. Postgres row-level security gates *rows*. If every gated app
+connects as the same `anon` role, the database cannot tell them apart, cannot
+tell them from each other, and cannot tell any of them from a stranger holding
+a leaked key.
+
+Three changes came out of this, and they reinforce each other:
+
+1. **The ungated deployment is gone** — repo, CI, and the live Worker.
+2. **`HandlerDeps.gate` is required**, so an ungated build no longer compiles.
+   A convention holds until someone is in a hurry; a type holds.
+3. **Both entrypoints fail closed** on missing gate configuration, rather than
+   degrading to public.
+
+If you take one habit from this repo, take the question that found it: *for
+every door into my data, what stops someone walking through it?* Answer it per
+door, not per app.
+
+---
+
+## Database-enforced attribution
+
+Deleting the ungated Worker closed the open door. It did not fix the room.
+
+Both remaining apps still connected to Postgres as the same `anon` role, so RLS
+could not tell them apart — or tell either of them from a stranger holding a
+leaked key. Attribution was enforced in one place: a line in the handler that
+overwrote `name`. Correct, and the only thing standing there.
+
+Now the database enforces it. Every request that survives a gate carries a
+**short-lived ES256 token minted for that specific caller** (`packages/core/src/token.ts`),
+and the insert policy compares its claims against the row being written:
+
+```sql
+create policy "you may only sign as yourself"
+  on public.messages for insert to authenticated
+  with check (
+    subject = auth.jwt() ->> 'sub'
+    and gate = auth.jwt() ->> 'gate'
+    and name = left(auth.jwt() ->> 'label', 50)
+  );
+```
+
+**Forging an entry now requires the signing key, not a bearer key.** The anon
+key has been revoked from the table entirely — it can no longer read or write
+it — which is a much better answer to "the anon key is public" than hoping
+nobody minds.
+
+### Three things worth stealing
+
+**`apikey` and `Authorization` do different jobs.** `apikey` identifies the
+project so Supabase's gateway can route you. `Authorization` decides what you
+may *do*. Nearly all Supabase code sends the same value for both, which is
+exactly why nobody notices they are separate — until you need them to differ.
+
+**Do not use `auth.uid()` unless your ids are UUIDs.** It is defined as
+`(claims ->> 'sub')::uuid`. An ATProto DID is not a UUID, so `auth.uid()`
+raises `invalid input syntax for type uuid` and the policy *errors* rather than
+denying. Use `auth.jwt() ->> 'sub'`, which stays text.
+
+**Grants and policies are different layers, and `TRUNCATE` only answers to
+grants.** Supabase grants ALL privileges on new public tables to `anon` and
+`authenticated`. RLS filters rows, which is why the guestbook behaved correctly
+anyway — an UPDATE with no policy matches zero rows. But **TRUNCATE is not
+row-level, so RLS never sees it.** Verified against this database: as `anon`,
+with every policy in place, `truncate public.messages` emptied the table. It
+was not reachable over HTTP (PostgREST has no TRUNCATE verb, and this project
+exposes no RPC), so it was latent rather than live — and it would have gone
+live the day anyone added a `SECURITY DEFINER` function. `authenticated` now
+holds exactly `SELECT, INSERT`.
+
+### On the signing key
+
+Supabase's current recommendation is asymmetric keys; the legacy shared HS256
+secret still works but is [being removed in late 2026](https://supabase.com/docs/guides/auth/signing-keys).
+Generate an ES256/P-256 keypair locally, keep the private half, and import it
+via the Management API — the API never returns private key material, so a
+Supabase-*generated* key cannot be used for signing.
+
+Import it as a **`standby`** key. The docs read as though standby keys are not
+used for verification; tested against this project, that is not the case — a
+standby key **is** published in the JWKS and PostgREST **does** accept tokens
+signed with it. That distinction matters: it means your key verifies without
+ever becoming the active key that Supabase Auth signs its own tokens with.
+
+Tokens live 60 seconds, are minted per request, and never reach a browser.
+
+Prove all of it with `pnpm audit:rls`, which now runs one pass as a stranger
+and one as a legitimate signer.
+
+---
+
+## Not being an easy target
+
+The threat this project actually faces is not a determined attacker. It is an
+automated crawler finding something free to call, and a free-tier bill. These
+are the cheap measures that answer that, and the surprises found installing
+them.
+
+**Rate limiting.** Cloudflare gets a runtime `ratelimits` binding (60/min/IP on
+`/api/*`); Vercel gets a WAF rule on `/api/atproto/login`, which is
+unauthenticated and writes a database row per call.
+
+> **Gotcha worth the whole section.** The Vercel rule was first configured with
+> `--rate-limit-action deny --duration 5m`. Exceeding a rule scoped to *one
+> path* then denied the IP across the **entire site** — homepage and stylesheet
+> included. A friend mistyping their handle eleven times would have been locked
+> out of everything for five minutes, including the page explaining why. Use
+> `--rate-limit-action rate_limit`, which throttles only the matching path.
+> Verified by sending 15 requests and watching which paths went 403.
+
+**OAuth states now expire.** `/api/atproto/login` writes an `atproto_states`
+row per call and only *successful* logins clean up after themselves. The
+original migration added an index on `created_at` and said it "supports
+cleanup" — and nothing ever cleaned. A comment promising work that does not
+exist is worse than no comment. There is now a `pg_cron` job every 15 minutes
+*and* an opportunistic sweep in the login route, so neither is load-bearing
+alone. The first real run swept two genuinely abandoned states.
+
+**Signing out revokes.** There was no logout for a while:
+`clearSessionCookie()` existed and was imported by nothing. That left a 7-day
+cookie nobody could revoke and an `atproto_sessions` row holding a refresh
+token and DPoP private key, quietly refreshing itself forever. Logout now tells
+the PDS to revoke *and* deletes our stored copy — clearing the cookie alone
+would leave both in place. It is POST-only, because a logout reachable by GET
+can be fired by any `<img>` tag.
+
+**Security headers on both hosts.** `vercel.json` had `nosniff` and a referrer
+policy; Cloudflare had *nothing*. Same app, same code, two postures, and no way
+to notice by looking at either site. Both now send a strict CSP, `frame-ancestors
+'none'`, and the rest.
+
+> **Second gotcha.** The obvious fix — a Pages-style `_headers` file — does not
+> work here. Workers Static Assets (wrangler 4.120) does not parse it; `wrangler
+> deploy` reported "Read 4 files", meaning it uploaded `_headers` as a *public
+> file*. And even where supported, `_headers` never applies to Worker-generated
+> responses, so `/api/*` could not be covered. The Worker instead uses
+> `run_worker_first` with an `ASSETS` binding and wraps every response itself —
+> one code path covering assets and API alike.
+
+**CORS is gone.** The API sent `access-control-allow-origin: *`. Safe as
+written — a wildcard cannot be combined with credentials — but it bought
+nothing, since every deployment serves its own frontend, and it sat one line
+away from a CSRF hole the day someone added `allow-credentials` to fix a
+cross-origin call.
+
+**Errors stopped narrating the schema.** `SupabaseError` carried 300 characters
+of PostgREST's response to the browser, which names tables, columns and
+constraints. The detail now goes to the logs; the caller gets the status (still
+honest, so clients can react) and a fixed string.
+
+---
+
 ## Using this as a starting point
 
 This repo exists to be raided. The guestbook is disposable; the wiring is not.
 
-**Adding a fourth variant** is deliberately cheap. `packages/core` takes a
+**Adding a third variant** is deliberately cheap. `packages/core` takes a
 `Gate` — resolve a request to an identity or refuse — so a new one means a new
 `apps/<name>/` with ~40 lines of verification and a `wrangler.jsonc`. Nothing in
 the app logic changes. Copy `apps/worker-access/` and replace `resolve()`.
+
+What you cannot cheaply add is a variant with *no* gate: `gate` is a required
+field, so that build does not compile. See [why](#why-the-ungated-deployment-was-deleted).
 
 **Which gate for which project:**
 
@@ -326,17 +520,14 @@ playstack/
 │   ├── lib/atproto/            OAuth client, session cookie, Supabase store
 │   └── vercel.json             project config (NOT vercel.ts — see above)
 │
-├── apps/worker/              ← Cloudflare deployment (public)
-│   ├── src/index.ts            fetch handler → core handler
-│   └── wrangler.jsonc          assets point at ../web/public
-│
 ├── apps/worker-access/       ← Cloudflare deployment (email + PIN)
 │   ├── src/index.ts            verifies the Access JWT, then core handler
 │   └── wrangler.jsonc          workers_dev: false — no back door
 │
 ├── supabase/migrations/      ← the schema AND the security model
-│   ├── …_create_messages.sql      public table, RLS allows read+insert
-│   └── …_atproto_oauth_sessions.sql  REVOKEd from anon, zero policies
+│   ├── …_create_messages.sql      the table, RLS on
+│   ├── …_atproto_oauth_sessions.sql  REVOKEd from anon, zero policies
+│   └── …_attributed_messages.sql  anon revoked; inserts must match your token
 │
 ├── tools/                    ← uv-managed Python ops CLI
 │   └── .python-version         pins 3.14 — see note in .gitignore
@@ -359,7 +550,7 @@ Every command below is one that actually runs. Anything that needed
 ```bash
 # The ones you'll use daily
 pnpm check                 # typecheck + test — run before pushing
-pnpm status                # health-check all three deployments + Supabase
+pnpm status                # health-check both deployments + Supabase
 pnpm audit:rls             # prove RLS is still enforced
 
 # Database
@@ -412,7 +603,7 @@ The most confusing part of any multi-platform setup, so here it is plainly.
 | Where | Holds | Set with |
 | --- | --- | --- |
 | `.env` (local, gitignored) | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | copied from `.env.example` |
-| `apps/worker/.dev.vars` | same two, for `wrangler dev` | created by hand |
+| `apps/worker-access/.dev.vars` | same two, for `wrangler dev` | created by hand |
 | Cloudflare | same two, in production | `wrangler secret put` — **once per Worker**, they persist |
 | Vercel | same two, in production | `vercel env add` |
 | GitHub Actions | deploy credentials only | repo secrets |
@@ -447,17 +638,21 @@ the opposite: it bypasses RLS completely, and it appears nowhere in this repo.
 
 ## Row Level Security, and proving it
 
-`supabase/migrations/…_create_messages.sql` enables RLS and then grants exactly
-two things: anyone may `select`, anyone may `insert`. There is deliberately **no
-update or delete policy** — under deny-by-default, their absence *is* the
-enforcement.
+`…_create_messages.sql` turns RLS on, and `…_attributed_messages.sql` is where
+the model actually lives: `anon` is revoked from the table entirely,
+`authenticated` holds exactly `SELECT, INSERT`, and the insert policy requires
+the row to match the caller's own token. There is deliberately **no update or
+delete policy** — under deny-by-default, their absence *is* the enforcement,
+and it applies to your own rows too.
 
 Don't take that on faith. `uv run playstack-ops audit-rls` behaves like an
-attacker holding your public key: it inserts a canary row, then tries to modify
-and delete it, and reports what the database actually allowed.
+attacker in two passes: first holding only the public anon key (which should
+now achieve *nothing*, including with a forged token), then holding a
+legitimately minted one, checking it cannot write as anybody else.
 
-It leaves the canary row behind — being unable to delete it is the passing
-result.
+See [Database-enforced attribution](#database-enforced-attribution) for why it
+works this way, and for the two traps found by testing rather than reading:
+`auth.uid()` casting to UUID, and `TRUNCATE` ignoring RLS completely.
 
 ---
 
@@ -486,11 +681,16 @@ pnpm exec supabase db push --db-url \
 cp .env.example .env        # fill in URL + anon key
 
 # 2. Cloudflare ------------------------------------------------------------
-cd apps/worker
-grep -E '^SUPABASE_(URL|ANON_KEY)=' ../../.env > .dev.vars   # local dev
-pnpm exec wrangler deploy                                     # create it first
+# Set ACCESS_TEAM_DOMAIN and ACCESS_AUD in wrangler.jsonc first — the Worker
+# refuses to serve without them rather than starting up ungated.
+cd apps/worker-access
+grep -E '^SUPABASE_(URL|ANON_KEY|JWT_)' ../../.env > .dev.vars   # local dev
+pnpm exec wrangler deploy                                        # create it first
 printf '%s' "$SUPABASE_URL"      | pnpm exec wrangler secret put SUPABASE_URL
 printf '%s' "$SUPABASE_ANON_KEY" | pnpm exec wrangler secret put SUPABASE_ANON_KEY
+# Writes are signed, not merely permitted — see "Database-enforced attribution".
+printf '%s' "$SUPABASE_JWT_KID"         | pnpm exec wrangler secret put SUPABASE_JWT_KID
+printf '%s' "$SUPABASE_JWT_PRIVATE_KEY" | pnpm exec wrangler secret put SUPABASE_JWT_PRIVATE_KEY
 
 # 3. Vercel ----------------------------------------------------------------
 cd ../web
@@ -498,6 +698,14 @@ pnpm exec vercel link --yes --project playstack
 for e in production preview development; do
   printf '%s' "$SUPABASE_URL"      | pnpm exec vercel env add SUPABASE_URL $e
   printf '%s' "$SUPABASE_ANON_KEY" | pnpm exec vercel env add SUPABASE_ANON_KEY $e
+done
+
+# The ATProto gate is REQUIRED, not opt-in: without these the Function throws
+# at cold start rather than serving an ungated guestbook. See
+# .env.example section 2 for what each one is and which are genuinely secret.
+for v in ATPROTO_GATE PUBLIC_ORIGIN SESSION_SECRET SUPABASE_SERVICE_ROLE_KEY \
+         SUPABASE_JWT_KID SUPABASE_JWT_PRIVATE_KEY; do
+  printf '%s' "${!v}" | pnpm exec vercel env add "$v" production
 done
 pnpm exec vercel pull --yes --environment=production
 pnpm exec vercel build --prod
@@ -530,7 +738,7 @@ test ──┬─→ migrate ──┬─→ deploy-vercel ───────
 ```
 
 `needs:` is what makes tests a gate rather than a suggestion. Migrations run
-before the code that depends on them, all three deployments ship from the same
+before the code that depends on them, both deployments ship from the same
 commit, and `verify` health-checks the result — because a deploy that
 "succeeded" while serving 500s is not a successful deploy.
 
@@ -544,7 +752,7 @@ Required GitHub repo **secrets**: `SUPABASE_DB_URL`, `SUPABASE_URL`,
 `SUPABASE_ANON_KEY`, `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`,
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
-Required **variables**: `VERCEL_URL`, `WORKER_URL`, `ACCESS_URL`.
+Required **variables**: `VERCEL_URL`, `ACCESS_URL`.
 
 The Cloudflare token needs `Workers Scripts:Edit`, `Account Settings:Read`
 **and** `Zone:Workers Routes:Edit` — the last one only because the Access

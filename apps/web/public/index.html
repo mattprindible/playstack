@@ -21,8 +21,14 @@
       </header>
 
       <form id="form" class="card" autocomplete="off">
-        <!-- Shown only when a gate is active; the server decides who you are. -->
+        <!-- The server decides who you are; there is no name field anywhere in
+             this app, because every deployment is gated and the API overwrites
+             `name` with the verified identity. -->
         <p id="whoami" class="whoami" hidden></p>
+
+        <!-- Only shown for gates we can actually sign out of. Cloudflare Access
+             sessions are managed by Cloudflare, not by this app. -->
+        <button type="button" id="signout" class="linklike" hidden>Sign out</button>
 
         <!-- ATProto sign-in. Revealed only when that gate is active and you
              are not signed in. There is no password field, deliberately:
@@ -33,11 +39,6 @@
             <input id="handle" name="handle" placeholder="san.haha.computer" />
             <button type="button" id="signin">Sign in</button>
           </div>
-        </div>
-
-        <div class="field" id="name-field">
-          <label for="name">Name</label>
-          <input id="name" name="name" maxlength="50" required placeholder="Ada Lovelace" />
         </div>
 
         <div class="field">

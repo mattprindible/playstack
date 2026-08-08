@@ -13,9 +13,6 @@ const countEl = $("count");
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
-/** Set by loadSession(): true when an auth gate is in front of this deployment. */
-let gated = false;
-
 /** Turn a timestamp into "3 minutes ago" without pulling in a date library. */
 function timeAgo(iso) {
   const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -88,18 +85,17 @@ async function loadMessages() {
 }
 
 /**
- * Ask the API who is answering and whether a gate is in front of it.
+ * Ask the API who is answering and which gate is in front of it.
  *
- * One frontend serves every variant of this app. Rather than building three
- * builds, the page asks /api/health at startup and adapts:
+ * One frontend serves both variants of this app. Rather than building twice,
+ * the page asks /api/health at startup and adapts:
  *
- *   no gate            -> type any name you like
- *   gate + identity     -> name field disappears; the server signs for you
- *   gate + no identity  -> you are not signed in
+ *   identity     -> the server signs your entries for you
+ *   no identity  -> you are not signed in yet
  *
- * The name input is REMOVED rather than pre-filled when a gate is active,
- * because with a gate the server overwrites it regardless. Showing an editable
- * field whose value is discarded would be a small lie about how it works.
+ * There is deliberately NO name input anywhere in this app. Every deployment
+ * is gated, and the server overwrites `name` with the verified identity, so an
+ * editable field would be a small lie about how the thing works.
  */
 async function loadSession() {
   try {
@@ -107,19 +103,19 @@ async function loadSession() {
     const data = await response.json();
 
     $("platform").textContent = data.platform ?? "unknown";
-    gated = Boolean(data.gate);
-
-    if (!gated) return;
-
-    $("name-field").hidden = true;
-    $("name").required = false;
 
     const whoami = $("whoami");
     whoami.hidden = false;
 
     if (data.identity) {
       whoami.textContent = `Signed in as ${data.identity}`;
-      if (data.gate === "atproto") loadGraph();
+      if (data.gate === "atproto") {
+        loadGraph();
+        // Only ATProto has a session this app owns and can revoke. A
+        // Cloudflare Access session belongs to Cloudflare — offering a button
+        // that cannot end it would be a lie.
+        $("signout").hidden = false;
+      }
     } else {
       whoami.textContent = `Not signed in — this guestbook is gated by ${data.gate}.`;
       whoami.classList.add("whoami-anon");
@@ -140,18 +136,13 @@ form.addEventListener("submit", async (event) => {
   showError("");
   submitBtn.disabled = true;
 
-  // When gated, don't send a name at all. The server overwrites it with the
-  // verified identity, so sending one would only invite the misconception that
-  // the client gets a say.
-  const payload = gated
-    ? { body: bodyInput.value }
-    : { name: $("name").value, body: bodyInput.value };
-
+  // Never send a name. The server overwrites it with the verified identity, so
+  // sending one would only invite the misconception that the client gets a say.
   try {
     const response = await fetch("/api/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ body: bodyInput.value }),
     });
 
     const data = await response.json();
@@ -183,6 +174,22 @@ if (signinBtn) {
     // screen in the address bar the user can actually inspect. An OAuth flow
     // hidden inside XHR would be a phishing pattern.
     window.location.href = `/api/atproto/login?handle=${encodeURIComponent(handle)}`;
+  });
+}
+
+const signoutBtn = $("signout");
+if (signoutBtn) {
+  signoutBtn.addEventListener("click", async () => {
+    signoutBtn.disabled = true;
+    try {
+      // POST, not a link: a logout reachable by GET can be triggered by any
+      // image tag on any page.
+      await fetch("/api/atproto/logout", { method: "POST" });
+      window.location.reload();
+    } catch {
+      showError("Could not sign out. Try again.");
+      signoutBtn.disabled = false;
+    }
   });
 }
 

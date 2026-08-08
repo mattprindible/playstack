@@ -8,8 +8,21 @@
     {
       "source": "/(.*)",
       "headers": [
+        {
+          "key": "content-security-policy",
+          "value": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+        },
         { "key": "x-content-type-options", "value": "nosniff" },
-        { "key": "referrer-policy", "value": "strict-origin-when-cross-origin" }
+        { "key": "referrer-policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "x-frame-options", "value": "DENY" },
+        {
+          "key": "permissions-policy",
+          "value": "geolocation=(), microphone=(), camera=(), payment=()"
+        },
+        {
+          "key": "strict-transport-security",
+          "value": "max-age=31536000; includeSubDomains"
+        }
       ]
     },
     {
