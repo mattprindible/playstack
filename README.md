@@ -7,6 +7,16 @@ a real deploy on every platform's free tier.
 The app is a guestbook: one table, one form, one list. It is trivial on purpose.
 Everything worth learning here is the wiring around it.
 
+**Live, from one commit and one shared handler:**
+
+| | URL |
+| --- | --- |
+| Vercel | https://playstack-nine.vercel.app |
+| Cloudflare | https://playstack.service-cloudflare-442.workers.dev |
+
+Both read and write the same Supabase database. Hit `/api/health` on each and it
+tells you which host answered.
+
 ---
 
 ## The one idea
@@ -84,6 +94,66 @@ win.
 
 ---
 
+## What actually broke (the useful part)
+
+Everything above sounds tidy. It was not. Cloudflare and Supabase deployed
+almost immediately; Vercel took five separate fixes, and none of them were
+guessable from the docs. If you only read one section, read this one.
+
+**1. Vercel could not read pnpm 11's lockfile.** With `packageManager` set,
+pnpm 11 manages itself and writes `packageManagerDependencies` /
+`configDependencies` into `pnpm-lock.yaml`. Vercel's parser predates those keys,
+logged `Error while parsing config file: pnpm-lock.yaml`, silently fell back to
+**npm**, and npm then failed on `workspace:*` — an error three steps removed
+from the cause. Fixed with `managePackageManagerVersions: false`.
+
+**2. `vercel.ts` cannot configure a pnpm workspace.** I initially used it
+because it is Vercel's current recommendation. It cannot work here: compiling a
+TypeScript config requires `@vercel/config` to be installed, so the install runs
+*before* any config is read — meaning an `installCommand` inside `vercel.ts` can
+never be seen in time. `vercel.json` is parsed directly, with no install.
+Reverted to JSON.
+
+**3. pnpm's workspace symlink breaks `--prebuilt` deploys.** pnpm links
+`apps/web/node_modules/@playstack/core` to a directory *outside* `apps/web`.
+Vercel's builder records that symlink in the function's `filePathMap` but never
+uploads it, so deploy fails with `File does not exist` — while the bundle
+already contains every compiled file from it. `apps/web` now imports core by
+relative path. The Worker keeps the idiomatic workspace import, because wrangler
+has no such problem.
+
+**4. Node wants `.ts` specifiers; Vercel emits `.js`.** The no-build-step trick
+needs imports written as `./x.ts`. Vercel compiles ahead of time, emits `.js`,
+and leaves the specifier saying `.ts` — so the Function died with
+`ERR_MODULE_NOT_FOUND`. TypeScript's `rewriteRelativeImportExtensions` rewrites
+them on emit only, leaving the source (and `node --test`) untouched.
+
+**5. Vercel treated the Web-standard handler as a Node one.** This was the
+expensive one. Vercel picks between `(req, res)` and `(Request) => Response` by
+inspecting the export; handed a closure it cannot inspect, it assumes Node. It
+then passed an `IncomingMessage` — whose `.url` is a bare path, not a URL — and
+waited for a `res.end()` that a returned `Response` never triggers. **The
+symptom was not an error but a hang**, up to the 300-second timeout, which looks
+identical to a network problem. `apps/web/api/[...path].ts` now does the
+Node→Web conversion explicitly.
+
+Two smaller ones worth knowing:
+
+- **Never name a script `dev` or `build` in a Vercel project's package.json if
+  it calls the Vercel CLI.** `vercel dev` auto-runs both, so it invokes itself
+  and dies with a recursion error. They are namespaced `vercel:build` here.
+- **A missing Cloudflare secret surfaces as a bare `error code: 1101`** with no
+  clue which variable is absent. The Worker now catches that and returns a 503
+  naming it.
+
+The honest lesson: Cloudflare Workers are Web-standard natively and the vanilla
+path is the *documented* one, so it just worked. Vercel's vanilla path is fully
+supported but not the maintained-and-marketed one, and the sharp edges cluster
+where its Node heritage meets Web standards. That is worth knowing before you
+pick a host for a framework-free project.
+
+---
+
 ## Supply-chain posture
 
 You mentioned this as a motivation, so it's explicit rather than incidental.
@@ -124,7 +194,7 @@ playstack/
 ├── apps/web/               ← the Vercel deployment
 │   ├── public/               static site (also served by Cloudflare)
 │   ├── api/[...path].ts      catch-all Function → core handler
-│   └── vercel.ts             typed project config
+│   └── vercel.json           project config (NOT vercel.ts — see above)
 │
 ├── apps/worker/            ← the Cloudflare deployment
 │   ├── src/index.ts          fetch handler → core handler
@@ -159,10 +229,11 @@ pnpm --filter @playstack/worker exec wrangler deploy
 pnpm --filter @playstack/worker exec wrangler secret put SUPABASE_URL
 pnpm --filter @playstack/worker exec wrangler tail        # live production logs
 
-# Vercel
-pnpm --filter @playstack/web exec vercel dev
-pnpm --filter @playstack/web exec vercel deploy --prod
-pnpm --filter @playstack/web exec vercel env pull .env    # sync env down
+# Vercel  (build locally, upload only the output — see "What actually broke")
+pnpm deploy:vercel                                        # build + deploy, from root
+pnpm --filter @playstack/web exec vercel env ls
+pnpm --filter @playstack/web exec vercel logs <deployment-url>
+pnpm --filter @playstack/web exec vercel curl /api/health  # bypasses SSO on preview URLs
 
 # Python ops
 cd tools
@@ -219,32 +290,52 @@ result.
 
 ## Setup from scratch
 
+These are the commands that actually worked, in order.
+
 ```bash
 pnpm install
 cd tools && uv sync && cd ..
 
-# 1. Supabase
+# 1. Supabase --------------------------------------------------------------
+# `supabase login` needs a TTY; run it in a real terminal, not through a tool.
 pnpm exec supabase login
-pnpm exec supabase projects create playstack --region us-east-1
-pnpm exec supabase link --project-ref <ref>
-pnpm exec supabase db push
+pnpm exec supabase projects create playstack \
+  --org-id <org> --region us-east-1 --db-password "$(openssl rand -hex 16)"
 
-cp .env.example .env        # fill in URL + anon key from the dashboard
+# NOTE: `supabase link` and `projects api-keys` are broken in CLI 2.112.0 —
+# they reject the API's own timestamp format. Work around both:
+#   - migrations: pass --db-url directly (no link required)
+#   - anon key:   copy it from the dashboard
+# Use the POOLER host. db.<ref>.supabase.co is IPv6-only and refuses IPv4.
+pnpm exec supabase db push --db-url \
+  "postgresql://postgres.<ref>:<password>@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
 
-# 2. Cloudflare
+cp .env.example .env        # fill in URL + anon key
+
+# 2. Cloudflare ------------------------------------------------------------
 cd apps/worker
-cp ../../.env .dev.vars     # local dev
-pnpm exec wrangler secret put SUPABASE_URL
-pnpm exec wrangler secret put SUPABASE_ANON_KEY
-pnpm exec wrangler deploy
+grep -E '^SUPABASE_(URL|ANON_KEY)=' ../../.env > .dev.vars   # local dev
+pnpm exec wrangler deploy                                     # create it first
+printf '%s' "$SUPABASE_URL"      | pnpm exec wrangler secret put SUPABASE_URL
+printf '%s' "$SUPABASE_ANON_KEY" | pnpm exec wrangler secret put SUPABASE_ANON_KEY
 
-# 3. Vercel
+# 3. Vercel ----------------------------------------------------------------
 cd ../web
-pnpm exec vercel link
-pnpm exec vercel env add SUPABASE_URL production
-pnpm exec vercel env add SUPABASE_ANON_KEY production
-pnpm exec vercel deploy --prod
+pnpm exec vercel link --yes --project playstack
+for e in production preview development; do
+  printf '%s' "$SUPABASE_URL"      | pnpm exec vercel env add SUPABASE_URL $e
+  printf '%s' "$SUPABASE_ANON_KEY" | pnpm exec vercel env add SUPABASE_ANON_KEY $e
+done
+pnpm exec vercel pull --yes --environment=production
+pnpm exec vercel build --prod
+pnpm exec vercel deploy --prebuilt --prod    # --prebuilt is required, not optional
 ```
+
+**On Vercel URLs:** per-deployment URLs (`playstack-<hash>.vercel.app`) are
+protected by Vercel Authentication and will 302 to an SSO login. The stable
+production alias (`playstack-nine.vercel.app`) is public. Use
+`vercel curl <path>` to test a protected preview URL without disabling
+anything.
 
 ### Optional: fully local Supabase
 
