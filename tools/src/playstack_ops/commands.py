@@ -324,17 +324,42 @@ def status() -> int:
         print(f"{WARN} supabase    not configured: {error}")
         return 0 if healthy else 1
 
+    # Probe with the ANON key, and expect to be REFUSED.
+    #
+    # This check used to assert a 200 here, back when the guestbook was
+    # readable by anyone. After the attributed-messages migration, anon has no
+    # grants on public.messages at all — so a 200 is now the regression and a
+    # 401 is the healthy answer. CI caught this on the very deploy that made it
+    # true, which is the check earning its keep.
+    #
+    # Same reasoning as the Access probe above, which treats a redirect to the
+    # login page as passing: for a gated resource, being turned away IS the
+    # correct response, and answering freely is the alarming one.
     with httpx.Client() as client:
-        response = client.get(
-            f"{config.rest_url}/messages",
-            headers=config.headers,
-            params={"select": "id", "limit": 1},
-            timeout=10.0,
-        )
-        if response.status_code == 200:
-            print(f"{OK} {'supabase':<12} reachable, RLS-scoped read OK")
+        try:
+            response = client.get(
+                f"{config.rest_url}/messages",
+                headers=config.headers,
+                params={"select": "id", "limit": 1},
+                timeout=10.0,
+            )
+        except httpx.RequestError as error:
+            print(f"{FAIL} {'supabase':<12} unreachable ({type(error).__name__})")
+            return 1
+
+        if response.status_code in (401, 403, 404):
+            print(
+                f"{OK} {'supabase':<12} reachable, and anon is correctly refused "
+                f"(HTTP {response.status_code})"
+            )
+        elif response.status_code == 200:
+            print(
+                f"{FAIL} {'supabase':<12} anon CAN READ messages — the lockdown "
+                f"has regressed. Check supabase/migrations/…_attributed_messages.sql"
+            )
+            healthy = False
         else:
-            print(f"{FAIL} {'supabase':<12} HTTP {response.status_code}")
+            print(f"{FAIL} {'supabase':<12} unexpected HTTP {response.status_code}")
             healthy = False
 
     return 0 if healthy else 1
