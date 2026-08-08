@@ -29,6 +29,22 @@ updates:
     groups:
       all-minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript 7 is the Go rewrite, and it changes the compiler API.
+      # `tsc --noEmit` is fine — `pnpm check` passed on 7.0.2 — but Vercel CLI
+      # 58.x calls the TypeScript API programmatically during `vercel build`
+      # and dies with "Cannot read properties of undefined (reading
+      # 'readFile')". Tried and reverted on 2026-08-08.
+      #
+      # The lesson is in which check caught it: typecheck and tests are not the
+      # build. Revisit when the Vercel CLI supports TS 7, and verify by running
+      # `vercel build` locally, not just `pnpm check`.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # @types/node should track the Node major actually running in CI and on
+      # Vercel (24). Newer types describe APIs that are not there at runtime.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "deps"
 
