@@ -1,0 +1,181 @@
+name: CI
+
+# The shape of this file is the whole point:
+#
+#   test  ──┬─→ migrate ──┬─→ deploy-vercel
+#           │             └─→ deploy-worker
+#           └─ (on a PR, stops here)
+#
+# `needs:` is what makes tests a gate rather than a suggestion. Nothing reaches
+# production unless typecheck and tests passed first, and the database migration
+# runs before the code that depends on it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the first. Stops two deploys from
+# racing each other to production.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default to read-only. Grant more per-job only where genuinely needed.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Runs on every push AND every pull request. This is the gate.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Typecheck & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # --frozen-lockfile fails if pnpm-lock.yaml disagrees with package.json.
+      # CI must install exactly what you committed — never silently resolve
+      # something newer.
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # Node's built-in runner. No test framework to install.
+      - name: Test
+        run: pnpm test
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # --locked is uv's equivalent of --frozen-lockfile.
+      - name: Install Python dependencies
+        run: uv sync --locked
+        working-directory: tools
+
+      - name: Check Python tooling imports
+        run: uv run playstack-ops --help
+        working-directory: tools
+
+  # ---------------------------------------------------------------------------
+  # Database first. If a migration fails, no code that assumes it ever ships.
+  # ---------------------------------------------------------------------------
+  migrate:
+    name: Apply Supabase migrations
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Applies any migration in supabase/migrations/ the remote database has
+      # not seen. Already-applied migrations are skipped, so this is safe to
+      # re-run on every deploy.
+      - name: Push migrations
+        run: pnpm exec supabase db push --db-url "$SUPABASE_DB_URL"
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+  # ---------------------------------------------------------------------------
+  # The two hosts deploy in parallel — same commit, same handler.
+  # ---------------------------------------------------------------------------
+  deploy-vercel:
+    name: Deploy to Vercel
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Build here rather than on Vercel's builders, so the artifact that ships
+      # is the one produced by this exact, already-tested commit.
+      - name: Pull Vercel project settings
+        run: pnpm dlx vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: pnpm dlx vercel build --prod --token=$VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        run: pnpm dlx vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+  deploy-worker:
+    name: Deploy to Cloudflare
+    needs: migrate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # SUPABASE_URL / SUPABASE_ANON_KEY are NOT set here. Worker secrets live
+      # on Cloudflare, uploaded once with `wrangler secret put`, and persist
+      # across deploys. CI only needs permission to deploy, not the app's
+      # configuration — keep the blast radius of a leaked CI token small.
+      - name: Deploy Worker
+        run: pnpm --filter @playstack/worker exec wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  # ---------------------------------------------------------------------------
+  # Prove the thing that just shipped is actually alive.
+  # A deploy that "succeeded" but serves 500s is not a successful deploy.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify deployments
+    needs: [deploy-vercel, deploy-worker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Health-check every deployment
+        run: uv run playstack-ops status
+        working-directory: tools
+        env:
+          VERCEL_URL: ${{ vars.VERCEL_URL }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

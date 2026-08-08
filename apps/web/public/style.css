@@ -1,0 +1,156 @@
+/* Plain CSS. No framework, no build step, no preprocessor.
+   Custom properties give us theming; prefers-color-scheme gives us dark mode. */
+
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --border: #e4e4e1;
+  --text: #1a1a18;
+  --muted: #6b6b66;
+  --accent: #2f6f4f;
+  --accent-text: #ffffff;
+  --danger: #b3261e;
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131315;
+    --surface: #1b1b1e;
+    --border: #2e2e33;
+    --text: #ececef;
+    --muted: #9a9aa2;
+    --accent: #6ee7a8;
+    --accent-text: #10261b;
+    --danger: #ff8a80;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 3rem 1.25rem 5rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main { max-width: 42rem; margin: 0 auto; }
+
+.masthead { margin-bottom: 2rem; }
+.masthead h1 { margin: 0 0 0.35rem; font-size: 2rem; letter-spacing: -0.02em; }
+.subtitle { margin: 0; color: var(--muted); font-size: 0.95rem; }
+
+.platform {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.45em;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 2.5rem;
+}
+
+.field { margin-bottom: 1rem; }
+
+label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  resize: vertical;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.counter {
+  display: block;
+  margin-top: 0.3rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  padding: 0.6rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { filter: brightness(1.07); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.error {
+  margin: 0.85rem 0 0;
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
+.entries { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
+
+.entry {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+}
+
+.entry-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.3rem;
+}
+
+.entry-name { font-weight: 650; }
+.entry-time { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
+
+/* white-space: pre-wrap preserves the author's line breaks. We set text via
+   textContent in app.js, so user input is never parsed as HTML. */
+.entry-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.empty { color: var(--muted); font-style: italic; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

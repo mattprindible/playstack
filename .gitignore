@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# platform-local state
+.vercel/
+.wrangler/
+.dev.vars
+supabase/.branches/
+supabase/.temp/
+
+# python (uv)
+.venv/
+__pycache__/
+*.pyc
+
+# misc
+.DS_Store
+*.log

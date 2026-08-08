@@ -1,0 +1,29 @@
+{
+  // Types are CHECKED by `tsc --noEmit` (dev-only) but never COMPILED.
+  // Node 24 strips the type annotations at runtime, so nothing is ever built.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["esnext", "dom"],
+    "types": ["node"],
+
+    "noEmit": true,
+
+    // We import with explicit `.ts` extensions because that is what Node's
+    // native type stripping requires at runtime.
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+
+    // Fails the build on any TypeScript syntax Node CANNOT strip
+    // (enums, namespaces, parameter properties, decorators).
+    // This is what guarantees the "no build step" promise keeps holding.
+    "erasableSyntaxOnly": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true
+  },
+  "include": ["packages/**/*.ts", "apps/**/*.ts", "*.ts"],
+  "exclude": ["node_modules", "**/node_modules"]
+}

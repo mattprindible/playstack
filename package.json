@@ -1,0 +1,29 @@
+{
+  "name": "playstack",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"packages/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm test",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:diff": "supabase db diff",
+    "db:push": "supabase db push",
+    "dev:web": "pnpm --filter @playstack/web dev",
+    "dev:worker": "pnpm --filter @playstack/worker dev",
+    "deploy:worker": "pnpm --filter @playstack/worker deploy",
+    "deploy:vercel": "pnpm --filter @playstack/api-vercel deploy"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "supabase": "^2.112.0",
+    "typescript": "^5.9.3"
+  }
+}

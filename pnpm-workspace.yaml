@@ -1,0 +1,35 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# ---------------------------------------------------------------------------
+# Supply-chain hardening
+#
+# The typical npm compromise works like this: an attacker steals a maintainer's
+# token, publishes a malicious patch release, and thousands of CI jobs install
+# it within minutes. It is usually caught and unpublished within hours.
+#
+# minimumReleaseAge refuses to install any package version younger than N
+# minutes, so you sit out that window entirely. 1440 = 24 hours.
+# This is the single highest-value setting here.
+# ---------------------------------------------------------------------------
+minimumReleaseAge: 1440
+
+# Lockfile is the source of truth. CI uses --frozen-lockfile so a compromised
+# or drifted registry cannot quietly change what gets installed.
+resolutionMode: highest
+
+# No package may run install-time scripts unless it is listed here.
+#
+# A postinstall script is arbitrary code executing on your machine and in CI the
+# moment you install — historically the most common way a malicious package
+# actually does damage. pnpm blocks them all by default and makes you name the
+# exceptions, which is why this list is short and every entry has a reason.
+#
+# When adding a dependency, pnpm will refuse to build it and print its name.
+# Do not reflexively add it here: check WHY it needs a script first. Legitimate
+# answers are almost always "it unpacks a platform-specific native binary".
+allowBuilds:
+  supabase: true # downloads the Supabase CLI binary for your OS/arch
+  esbuild: true # native binary, pulled in by wrangler
+  workerd: true # the actual Cloudflare Workers runtime, used by `wrangler dev`

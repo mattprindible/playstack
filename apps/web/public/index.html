@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Playstack Guestbook</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>"
+    />
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <h1>Guestbook</h1>
+        <p class="subtitle">
+          One table, one form, one shared handler — running on
+          <span id="platform" class="platform" aria-live="polite">…</span>
+        </p>
+      </header>
+
+      <form id="form" class="card" autocomplete="off">
+        <div class="field">
+          <label for="name">Name</label>
+          <input id="name" name="name" maxlength="50" required placeholder="Ada Lovelace" />
+        </div>
+
+        <div class="field">
+          <label for="body">Message</label>
+          <textarea id="body" name="body" maxlength="500" rows="3" required
+            placeholder="Say hello…"></textarea>
+          <span class="counter"><span id="count">0</span>/500</span>
+        </div>
+
+        <button type="submit" id="submit">Sign the guestbook</button>
+        <p id="error" class="error" role="alert" hidden></p>
+      </form>
+
+      <section aria-labelledby="entries-heading">
+        <h2 id="entries-heading" class="visually-hidden">Entries</h2>
+        <ul id="entries" class="entries"></ul>
+        <p id="empty" class="empty" hidden>No messages yet. Be the first.</p>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
