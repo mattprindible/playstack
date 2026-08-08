@@ -197,5 +197,10 @@ jobs:
         env:
           VERCEL_URL: ${{ vars.VERCEL_URL }}
           WORKER_URL: ${{ vars.WORKER_URL }}
+          # The Access-gated deployment. `status` treats a redirect to the
+          # Cloudflare login page as PASSING — that is the gate working. It
+          # would fail if the endpoint ever started answering directly, which
+          # is exactly the regression worth catching.
+          ACCESS_URL: ${{ vars.ACCESS_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

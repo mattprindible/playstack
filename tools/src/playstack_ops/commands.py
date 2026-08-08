@@ -180,16 +180,32 @@ def _probe(client: httpx.Client, label: str, url: str) -> bool:
         print(f"{FAIL} {label:<12} unreachable ({type(error).__name__})")
         return False
 
+    # A deployment behind Cloudflare Access redirects an unauthenticated probe
+    # to the team login page, which answers 200 with HTML. Parsed naively that
+    # looks healthy, and it would ALSO look healthy if the gate had fallen off
+    # entirely — so check where we actually landed. Being bounced to the login
+    # page is the correct, passing result for a gated endpoint.
+    if "cloudflareaccess.com" in str(response.url):
+        print(f"{OK} {label:<12} gated by Access (login required)  {url}")
+        return True
+
     if response.status_code != 200:
         print(f"{FAIL} {label:<12} HTTP {response.status_code}  {url}")
         return False
 
     try:
-        platform = response.json().get("platform", "?")
+        payload = response.json()
     except ValueError:
-        platform = "?"
+        # 200 but not JSON means something is serving a page where the API
+        # should be. Never report that as healthy.
+        print(f"{FAIL} {label:<12} 200 but not JSON — is something else serving this?  {url}")
+        return False
 
-    print(f"{OK} {label:<12} healthy, served by '{platform}'  {url}")
+    platform = payload.get("platform", "?")
+    gate = payload.get("gate")
+    suffix = f", gate '{gate}'" if gate else ""
+
+    print(f"{OK} {label:<12} healthy, served by '{platform}'{suffix}  {url}")
     return True
 
 
@@ -198,6 +214,7 @@ def status() -> int:
     targets = [
         ("vercel", os.environ.get("VERCEL_URL")),
         ("cloudflare", os.environ.get("WORKER_URL")),
+        ("cf-access", os.environ.get("ACCESS_URL")),
     ]
 
     configured = [(label, url) for label, url in targets if url]

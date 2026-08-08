@@ -7,15 +7,17 @@ a real deploy on every platform's free tier.
 The app is a guestbook: one table, one form, one list. It is trivial on purpose.
 Everything worth learning here is the wiring around it.
 
-**Live, from one commit and one shared handler:**
+**Live — three deployments, one commit, one shared handler:**
 
-| | URL |
-| --- | --- |
-| Vercel | https://playstack-nine.vercel.app |
-| Cloudflare | https://playstack.service-cloudflare-442.workers.dev |
+| Host | Gate | URL |
+| --- | --- | --- |
+| Cloudflare | none | https://playstack.service-cloudflare-442.workers.dev |
+| Cloudflare | email + PIN | https://playstack.haha.computer |
+| Vercel | ATProto OAuth | https://playstack-nine.vercel.app |
 
-Both read and write the same Supabase database. Hit `/api/health` on each and it
-tells you which host answered.
+All three serve the same static frontend, run the same handler, and read and
+write the same Supabase database. Hit `/api/health` on any of them and it tells
+you which host answered and which gate is in front.
 
 ---
 
@@ -160,6 +162,50 @@ network?**
 
 ---
 
+## Using this as a starting point
+
+This repo exists to be raided. The guestbook is disposable; the wiring is not.
+
+**Adding a fourth variant** is deliberately cheap. `packages/core` takes a
+`Gate` — resolve a request to an identity or refuse — so a new one means a new
+`apps/<name>/` with ~40 lines of verification and a `wrangler.jsonc`. Nothing in
+the app logic changes. Copy `apps/worker-access/` and replace `resolve()`.
+
+**Which gate for which project:**
+
+- **Email + PIN (Cloudflare Access)** — anything for a known group. Friends,
+  family, yourself. No signup flow, no user table, no auth code beyond
+  verification. Add an address to the policy and you're done.
+- **ATProto OAuth** — when reach should follow your social graph rather than a
+  list you maintain: mutuals, followers, "anyone with a handle". Costs a Node
+  runtime (Vercel), because the official client won't run on Workers.
+
+**The rule for whether you need real infrastructure**, learned building this and
+worth restating precisely:
+
+> Can you enumerate the authors?
+
+If yes — a guestbook, a shared tool, anything where you know whose data you
+need — you fan out reads and store nothing. A Worker and a cookie is a whole
+backend, even if the data lives in users' PDSes.
+
+If no — "everything about X", "what my follows said" — you must consume the
+firehose and keep an index. That's an always-on service with real cost. Most
+hobby-scale apps never cross that line.
+
+**Not built here, in rough order of interest:**
+
+1. **Writing records to a user's PDS.** `agent.com.atproto.repo.createRecord`.
+   Turns the guestbook into something where entries live in each signer's own
+   repo — identity *and* data, not just identity. Note the trade: users can
+   delete their own records, so you lose the ability to promise permanence.
+   That's user agency, and it's a product decision as much as a technical one.
+2. **A custom lexicon** defining what an entry *is*. There's already a
+   `_lexicon.san.haha.computer` DNS record, so the groundwork exists.
+3. **A network index.** Only if #1 grows past enumerable authors.
+
+---
+
 ## What actually broke (the useful part)
 
 Everything above sounds tidy. It was not. Cloudflare and Supabase deployed
@@ -261,26 +307,44 @@ stricter and is what I'd recommend before you rely on this in anger.
 
 ```
 playstack/
-├── packages/core/          ← all the logic, platform-agnostic
+├── packages/core/            ← ALL the logic, platform- and gate-agnostic
 │   └── src/
-│       ├── handler.ts        the (Request) => Response router
-│       ├── handler.test.ts   8 tests, no network, no deps
-│       ├── supabase.ts       PostgREST over plain fetch
-│       └── env.ts            the one place platforms differ
+│       ├── handler.ts          the (Request) => Response router + Gate
+│       ├── handler.test.ts     gates, routing, validation
+│       ├── env.test.ts         env validation (20 tests total, zero deps)
+│       ├── supabase.ts         PostgREST over plain fetch
+│       └── env.ts              the one place platforms differ
 │
-├── apps/web/               ← the Vercel deployment
-│   ├── public/               static site (also served by Cloudflare)
-│   ├── api/[...path].ts      catch-all Function → core handler
-│   └── vercel.json           project config (NOT vercel.ts — see above)
+├── apps/web/                 ← Vercel deployment (ATProto-gated)
+│   ├── public/                 static site — ALSO served by both Workers
+│   │   ├── index.html          one page that adapts to whichever gate is on
+│   │   ├── app.js              vanilla ES module, no build
+│   │   └── style.css
+│   ├── api/
+│   │   ├── [...path].ts        catch-all → core handler (+ Node↔Web adapter)
+│   │   └── atproto/            login, callback, client-metadata, me
+│   ├── lib/atproto/            OAuth client, session cookie, Supabase store
+│   └── vercel.json             project config (NOT vercel.ts — see above)
 │
-├── apps/worker/            ← the Cloudflare deployment
-│   ├── src/index.ts          fetch handler → core handler
-│   └── wrangler.jsonc        assets point at ../web/public
+├── apps/worker/              ← Cloudflare deployment (public)
+│   ├── src/index.ts            fetch handler → core handler
+│   └── wrangler.jsonc          assets point at ../web/public
 │
-├── supabase/migrations/    ← the schema AND the security model
-├── tools/                  ← uv-managed Python ops CLI
+├── apps/worker-access/       ← Cloudflare deployment (email + PIN)
+│   ├── src/index.ts            verifies the Access JWT, then core handler
+│   └── wrangler.jsonc          workers_dev: false — no back door
+│
+├── supabase/migrations/      ← the schema AND the security model
+│   ├── …_create_messages.sql      public table, RLS allows read+insert
+│   └── …_atproto_oauth_sessions.sql  REVOKEd from anon, zero policies
+│
+├── tools/                    ← uv-managed Python ops CLI
+│   └── .python-version         pins 3.14 — see note in .gitignore
 └── .github/workflows/ci.yml
 ```
+
+Three deployments, one `public/` directory, one `packages/core`. Nothing about
+the guestbook is duplicated per platform or per gate.
 
 ---
 
@@ -289,35 +353,50 @@ playstack/
 Each platform's CLI installs **per project**, not globally, so the version is
 pinned in a lockfile and CI runs exactly what you run.
 
+Every command below is one that actually runs. Anything that needed
+`supabase link` was removed, because link is broken in CLI 2.112.0.
+
 ```bash
-# Everything
-pnpm check                  # typecheck + test — run this before pushing
-pnpm test                   # node --test
-pnpm typecheck              # tsc --noEmit
+# The ones you'll use daily
+pnpm check                 # typecheck + test — run before pushing
+pnpm status                # health-check all three deployments + Supabase
+pnpm audit:rls             # prove RLS is still enforced
 
-# Supabase
-pnpm exec supabase db push      # apply migrations to the remote database
-pnpm exec supabase migration new <name>
-pnpm exec supabase gen types typescript --linked   # types from your real schema
+# Database
+pnpm db:new <name>         # new migration file
+pnpm db:push               # apply migrations (reads SUPABASE_DB_URL from .env)
 
-# Cloudflare
-pnpm --filter @playstack/worker exec wrangler dev
-pnpm --filter @playstack/worker exec wrangler deploy
-pnpm --filter @playstack/worker exec wrangler secret put SUPABASE_URL
-pnpm --filter @playstack/worker exec wrangler tail        # live production logs
+# Deploys — CI does these on push; these are for out-of-band
+pnpm deploy:worker         # public guestbook
+pnpm deploy:worker-access  # Access-gated
+pnpm deploy:vercel         # build locally, upload prebuilt (required, not an optimisation)
 
-# Vercel  (build locally, upload only the output — see "What actually broke")
-pnpm deploy:vercel                                        # build + deploy, from root
-pnpm --filter @playstack/web exec vercel env ls
+# Local dev
+pnpm dev:worker            # miniflare, real workerd
+pnpm dev:worker-access     # needs apps/worker-access/.dev.vars
+
+# Cloudflare, direct
+pnpm --filter @playstack/worker-access exec wrangler tail          # live prod logs
+pnpm --filter @playstack/worker-access exec wrangler secret put SUPABASE_URL
+pnpm --filter @playstack/worker-access exec wrangler secret list   # secrets are PER-Worker
+
+# Vercel, direct
 pnpm --filter @playstack/web exec vercel logs <deployment-url>
-pnpm --filter @playstack/web exec vercel curl /api/health  # bypasses SSO on preview URLs
+pnpm --filter @playstack/web exec vercel env ls
+pnpm --filter @playstack/web exec vercel curl /api/health   # bypasses SSO on preview URLs
 
 # Python ops
-cd tools
-uv run playstack-ops status      # health-check every deployment
-uv run playstack-ops seed -n 5   # insert sample messages
-uv run playstack-ops audit-rls   # prove RLS is actually enforced
+cd tools && uv run playstack-ops seed -n 5
 ```
+
+**Deliberately absent:**
+
+- `vercel dev` — it recurses into any `dev`/`build` script that calls the Vercel
+  CLI, and even once renamed it hung on first request. Use `pnpm dev:worker`
+  (real workerd) or deploy a preview.
+- `supabase start` / `db reset` / `db diff` — all need Docker, which isn't
+  installed here. Nothing depends on them: the tests stub `fetch`.
+- `supabase gen types --linked` — needs `link`. Use `--db-url "$SUPABASE_DB_URL"`.
 
 There's also `cf`, Cloudflare's newer CLI covering the whole platform (DNS,
 zones, R2, D1…) rather than just Workers. Worth knowing about:
@@ -444,17 +523,34 @@ never needs a database at all.
 ## CI/CD
 
 ```
-test ──┬─→ migrate ──┬─→ deploy-vercel ──┬─→ verify
-       │             └─→ deploy-worker ──┘
+test ──┬─→ migrate ──┬─→ deploy-vercel ─────────────┬─→ verify
+       │             └─→ deploy-worker ─────────────┘
+       │                 (public AND Access-gated)
        └─ on a PR, stops here
 ```
 
 `needs:` is what makes tests a gate rather than a suggestion. Migrations run
-before the code that depends on them, the two hosts deploy in parallel from the
-same commit, and `verify` health-checks the result — because a deploy that
+before the code that depends on them, all three deployments ship from the same
+commit, and `verify` health-checks the result — because a deploy that
 "succeeded" while serving 500s is not a successful deploy.
+
+`verify` is stricter than it looks. For the Access-gated host it treats a
+redirect to the Cloudflare login page as **passing** — that is the gate doing
+its job — and fails if the endpoint ever starts answering directly. It also
+fails on a 200 that isn't JSON, so "something else is serving this" can't
+masquerade as healthy.
 
 Required GitHub repo **secrets**: `SUPABASE_DB_URL`, `SUPABASE_URL`,
 `SUPABASE_ANON_KEY`, `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`,
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
-Required **variables**: `VERCEL_URL`, `WORKER_URL`.
+
+Required **variables**: `VERCEL_URL`, `WORKER_URL`, `ACCESS_URL`.
+
+The Cloudflare token needs `Workers Scripts:Edit`, `Account Settings:Read`
+**and** `Zone:Workers Routes:Edit` — the last one only because the Access
+variant binds a custom domain, and its absence fails with a bare
+`Authentication error [code: 10000]`.
+
+**Not in CI, by design:** the app's own configuration. Worker secrets live on
+Cloudflare, Vercel env vars live on Vercel. CI holds credentials to *deploy*
+and nothing else, so a leaked CI token cannot read your database.

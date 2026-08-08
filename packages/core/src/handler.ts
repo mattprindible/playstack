@@ -1,14 +1,23 @@
 /**
  * THE shared HTTP handler. This is the centrepiece of the repo.
  *
- * It is written against the Web platform's `Request` -> `Response` contract,
- * which both Vercel Functions and Cloudflare Workers speak natively. That is
- * why the very same file runs on both hosts with no adapter, no shim and no
- * framework — see apps/api-vercel and apps/worker, which are ~10 lines each.
+ * Written against the Web platform's `Request` -> `Response` contract, so the
+ * same file backs every deployment:
  *
- * Everything platform-specific (where env vars come from, how the process is
- * started) is injected as `deps`. That keeps this file pure and, as a happy
- * side effect, trivially testable without a network or a mocking library.
+ *   apps/worker/src/index.ts         public guestbook          ~30 lines
+ *   apps/worker-access/src/index.ts  behind Cloudflare Access  ~40 lines
+ *   apps/web/api/[...path].ts        Vercel, ATProto-gated     ~100 lines
+ *
+ * Those line counts tell the real story, and an earlier version of this
+ * comment got it wrong by claiming all hosts need "no adapter". Cloudflare
+ * genuinely needs none — Workers ARE Web-standard. Vercel's Node runtime is
+ * not, and that file has to convert (req, res) to Request/Response by hand.
+ * See its header for why guessing cost hours.
+ *
+ * Everything platform-specific — where env vars come from, how identity is
+ * established, how the process is started — is injected as `deps`. That is
+ * what keeps this file pure, testable without a network, and unchanged whether
+ * the app is public, behind an email PIN, or behind ATProto OAuth.
  */
 
 import type { Env } from "./env.ts";

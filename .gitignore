@@ -18,6 +18,12 @@ supabase/.temp/
 __pycache__/
 *.pyc
 
+# .python-version MUST be committed — it pins the interpreter so CI resolves
+# the same one you do. A global ~/.gitignore_global rule was silently excluding
+# it, so this negation re-includes it for this repo.
+!.python-version
+!tools/.python-version
+
 # misc
 .DS_Store
 *.log
