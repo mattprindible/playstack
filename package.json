@@ -15,11 +15,10 @@
     "db:new": "supabase migration new",
     "db:push": "set -a && . ./.env && set +a && supabase db push --db-url \"$SUPABASE_DB_URL\"",
 
-    "dev:worker": "pnpm --filter @playstack/worker dev",
-    "dev:worker-access": "pnpm --filter @playstack/worker-access dev",
+    "dev:worker-access": "pnpm --filter @playstack/worker-access run dev",
 
-    "deploy:worker": "pnpm --filter @playstack/worker deploy",
-    "deploy:worker-access": "pnpm --filter @playstack/worker-access deploy",
+    "//deploy": "`run` is REQUIRED here: bare `pnpm --filter x deploy` resolves to pnpm's own built-in deploy command, not the package script, and fails with ERR_PNPM_INVALID_DEPLOY_TARGET.",
+    "deploy:worker-access": "pnpm --filter @playstack/worker-access run deploy",
     "deploy:vercel": "pnpm --filter @playstack/web exec vercel build --prod && pnpm --filter @playstack/web exec vercel deploy --prebuilt --prod",
 
     "audit:rls": "cd tools && uv run playstack-ops audit-rls",
