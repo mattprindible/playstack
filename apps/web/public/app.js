@@ -119,10 +119,16 @@ async function loadSession() {
 
     if (data.identity) {
       whoami.textContent = `Signed in as ${data.identity}`;
+      if (data.gate === "atproto") loadGraph();
     } else {
       whoami.textContent = `Not signed in — this guestbook is gated by ${data.gate}.`;
       whoami.classList.add("whoami-anon");
       submitBtn.disabled = true;
+
+      // Cloudflare Access redirects you to a login page automatically, so
+      // there is nothing to show. ATProto needs your handle first, because
+      // that is what tells us which server to send you to.
+      if (data.gate === "atproto") $("atproto-login").hidden = false;
     }
   } catch {
     $("platform").textContent = "offline";
@@ -164,6 +170,56 @@ form.addEventListener("submit", async (event) => {
 bodyInput.addEventListener("input", () => {
   countEl.textContent = String(bodyInput.value.length);
 });
+
+// --- ATProto -------------------------------------------------------------
+
+const signinBtn = $("signin");
+if (signinBtn) {
+  signinBtn.addEventListener("click", () => {
+    const handle = $("handle").value.trim().replace(/^@/, "");
+    if (!handle) return showError("Enter your handle, e.g. san.haha.computer");
+
+    // A full navigation, not fetch: the PDS needs to render its own consent
+    // screen in the address bar the user can actually inspect. An OAuth flow
+    // hidden inside XHR would be a phishing pattern.
+    window.location.href = `/api/atproto/login?handle=${encodeURIComponent(handle)}`;
+  });
+}
+
+/**
+ * Read the signed-in user's own graph.
+ *
+ * This is the cheap half of ATProto: one authenticated request, no storage of
+ * our own. Cross-user questions ("what did my follows post about X") have no
+ * equivalent endpoint and would require indexing the firehose.
+ */
+async function loadGraph() {
+  try {
+    const response = await fetch("/api/atproto/me");
+    if (!response.ok) return;
+    const data = await response.json();
+
+    const { identity, follows } = data;
+    $("graph-summary").textContent =
+      `${identity.displayName ?? identity.handle} — ` +
+      `${identity.followsCount ?? "?"} following, ` +
+      `${identity.followersCount ?? "?"} followers. ` +
+      `Showing ${follows.length}, read live from your PDS.`;
+
+    $("follows").replaceChildren(
+      ...follows.map((f) => {
+        const li = document.createElement("li");
+        li.className = "follow";
+        li.textContent = f.displayName ? `${f.displayName} (@${f.handle})` : `@${f.handle}`;
+        return li;
+      }),
+    );
+
+    $("graph").hidden = false;
+  } catch {
+    // The graph is a bonus panel; never let it break the guestbook.
+  }
+}
 
 // Session first: it decides whether the name field is even shown, and we would
 // rather not flash an input that is about to disappear.

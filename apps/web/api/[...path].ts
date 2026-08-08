@@ -35,7 +35,36 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 // deploy then fails with "File does not exist:
 // apps/web/node_modules/@playstack/core" even though the bundle already holds
 // every compiled file. A relative path sidesteps node resolution entirely.
-import { createHandler, readEnv } from "../../../packages/core/src/index.ts";
+import { createHandler, readEnv, type Gate } from "../../../packages/core/src/index.ts";
+import { verifySessionCookie } from "../lib/atproto/session.ts";
+
+/**
+ * The ATProto gate — prototype B.
+ *
+ * Opt-in via ATPROTO_GATE=on. Absent, this deployment stays the public
+ * guestbook, which is the app's ordinary state rather than a security failure
+ * (contrast apps/worker-access, where a missing config means the gate is
+ * broken and it refuses to serve).
+ *
+ * Note how little happens here: verify our own signed cookie, read the DID and
+ * handle out of it, done. No token refresh, no PDS call, no database. The
+ * expensive parts of ATProto auth all happened once at /api/atproto/callback.
+ */
+function atprotoGate(): Gate | undefined {
+  if (process.env.ATPROTO_GATE?.trim() !== "on") return undefined;
+
+  return {
+    name: "atproto",
+    async resolve(request: Request) {
+      const session = await verifySessionCookie(request.headers.get("cookie"));
+      if (!session) return null;
+
+      // The handle is what gets shown; the DID is the stable identity, so a
+      // rename never turns a visitor into a different person.
+      return { label: session.handle, subject: session.did };
+    },
+  };
+}
 
 // Read config once, at module load. If a variable is missing we throw during
 // cold start and the logs name it — far better than a mystery 401 from
@@ -43,10 +72,13 @@ import { createHandler, readEnv } from "../../../packages/core/src/index.ts";
 //
 // On Vercel, configuration arrives as ambient `process.env`. On Cloudflare it
 // is passed into fetch(). That difference is the entire reason readEnv exists.
+const gate = atprotoGate();
+
 const handler = createHandler({
   env: readEnv(process.env),
   fetch: globalThis.fetch,
-  platform: "vercel",
+  platform: gate ? "vercel (atproto)" : "vercel",
+  gate,
 });
 
 /** Headers Node manages itself; forwarding them corrupts the Request. */

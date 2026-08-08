@@ -24,6 +24,17 @@
         <!-- Shown only when a gate is active; the server decides who you are. -->
         <p id="whoami" class="whoami" hidden></p>
 
+        <!-- ATProto sign-in. Revealed only when that gate is active and you
+             are not signed in. There is no password field, deliberately:
+             your handle is all we need to find your PDS and send you there. -->
+        <div class="field" id="atproto-login" hidden>
+          <label for="handle">Sign in with your ATProto handle</label>
+          <div class="row">
+            <input id="handle" name="handle" placeholder="san.haha.computer" />
+            <button type="button" id="signin">Sign in</button>
+          </div>
+        </div>
+
         <div class="field" id="name-field">
           <label for="name">Name</label>
           <input id="name" name="name" maxlength="50" required placeholder="Ada Lovelace" />
@@ -39,6 +50,15 @@
         <button type="submit" id="submit">Sign the guestbook</button>
         <p id="error" class="error" role="alert" hidden></p>
       </form>
+
+      <!-- Populated from the signed-in user's own social graph. Every name here
+           was read on their behalf — nothing about the wider network is stored
+           or indexed by this app. -->
+      <section id="graph" class="card" hidden aria-labelledby="graph-heading">
+        <h2 id="graph-heading" class="graph-heading">Your graph</h2>
+        <p id="graph-summary" class="subtitle"></p>
+        <ul id="follows" class="follows"></ul>
+      </section>
 
       <section aria-labelledby="entries-heading">
         <h2 id="entries-heading" class="visually-hidden">Entries</h2>

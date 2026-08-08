@@ -46,3 +46,4 @@ allowBuilds:
   supabase: true # downloads the Supabase CLI binary for your OS/arch
   esbuild: true # native binary, pulled in by wrangler
   workerd: true # the actual Cloudflare Workers runtime, used by `wrangler dev`
+  core-js: false # postinstall only prints a donation banner — nothing to build

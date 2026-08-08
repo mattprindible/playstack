@@ -137,6 +137,25 @@ def audit_rls() -> int:
             print(f"{FAIL} DELETE SUCCEEDED — anyone can erase the guestbook!")
             failures += 1
 
+        # 5. The OAuth tables hold refresh tokens and DPoP private keys. The
+        #    anon key must not see them AT ALL — not an empty list, not a 401,
+        #    but a 404, because the tables are REVOKEd rather than merely
+        #    policy-filtered. PostgREST then reports them as nonexistent, which
+        #    leaks nothing about what this project stores.
+        for table in ("atproto_states", "atproto_sessions"):
+            probe = client.get(
+                f"{config.rest_url}/{table}",
+                headers=config.headers,
+                params={"select": "*", "limit": 1},
+            )
+            if probe.status_code == 200:
+                print(f"{FAIL} {table} IS READABLE with the anon key — refresh tokens exposed!")
+                failures += 1
+            elif probe.status_code == 404:
+                print(f"{OK} {table} invisible to anon (404, not an empty list)")
+            else:
+                print(f"{OK} {table} blocked to anon (HTTP {probe.status_code})")
+
     print()
     if failures:
         print(f"{FAIL} {failures} RLS check(s) FAILED. Review supabase/migrations/.")
