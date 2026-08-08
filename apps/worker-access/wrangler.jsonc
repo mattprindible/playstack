@@ -36,9 +36,18 @@
   // Not secrets — the team domain is in every login URL and the AUD tag is a
   // public identifier. They are vars so they are reviewable in git; the
   // security comes from the JWT signature, not from hiding these.
+  // Both are public identifiers, not secrets:
+  //   ACCESS_TEAM_DOMAIN appears in every login URL.
+  //   ACCESS_AUD is handed out in the unauthenticated login redirect (as the
+  //     `kid` query param, and inside the `meta` JWT's `aud` claim) — which is
+  //     also the easiest way to find it if the dashboard hides it.
+  //
+  // Their being public is exactly why the audience check matters: knowing the
+  // AUD gets you nothing, because you still cannot forge Cloudflare's
+  // signature. Security lives in the JWKS verification, not in secrecy.
   "vars": {
-    "ACCESS_TEAM_DOMAIN": "REPLACE_ME",
-    "ACCESS_AUD": "REPLACE_ME"
+    "ACCESS_TEAM_DOMAIN": "mfd-is",
+    "ACCESS_AUD": "b52fcffa1f88f693e63415fb2a295b4da151e2ce5b2e40b1ec37bf2805f22ee3"
   },
 
   "observability": {
