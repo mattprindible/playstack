@@ -4,6 +4,7 @@
   "buildCommand": null,
   "outputDirectory": "public",
   "installCommand": "pnpm install --frozen-lockfile",
+  "rewrites": [{ "source": "/api/messages/:id", "destination": "/api/[...path]" }],
   "headers": [
     {
       "source": "/(.*)",

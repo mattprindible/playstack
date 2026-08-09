@@ -475,6 +475,38 @@ work, so a package missing from `package.json` can go unnoticed. What it does
 **not** cost is anything supply-chain related — the lockfile, `minimumReleaseAge`
 and the `allowBuilds` allow-list are all unaffected.
 
+**7. `[...path].ts` is not a catch-all on Vercel's zero-config `api/` builder.**
+The filename says catch-all; the generated route says otherwise:
+
+```json
+{ "src": "^/api/([^/]+)$", "dest": "/api/[...path]?...path=$1" }
+```
+
+`[^/]+` is **one** path segment. So `/api/messages` reached the handler and
+`/api/messages/1` fell straight through to the builder's own
+`{"src": "^/api(/.*)?$", "status": 404}` — Vercel's HTML 404, from a route this
+app never wrote, for a URL its router handles perfectly well. Nothing had a
+nested API path until entries became editable, so it sat there unnoticed. Fixed
+with an explicit rewrite in `vercel.json`:
+
+```json
+"rewrites": [{ "source": "/api/messages/:id", "destination": "/api/[...path]" }]
+```
+
+The Cloudflare Worker needs none of it — it matches `/api/` and routes in code,
+so the same handler serving the same URLs just works. **That is the shape of
+almost every difference in this repo: not that one platform can do something
+the other cannot, but that one needs configuration to reach code it already
+has.**
+
+Two things found while fixing it. `vercel.json` is schema-validated *on deploy
+only* — a `"//rewrites"` comment key passed `vercel build` and then failed
+`vercel deploy` with "should NOT have additional property". The `"//deploy"`
+trick in `package.json` works because npm ignores unknown keys; Vercel does
+not. And preview deployments sit behind Vercel's SSO protection, so a preview
+cannot be probed with plain `curl` the way production can — verifying a routing
+fix means either an automation bypass token or shipping it.
+
 Two smaller ones worth knowing:
 
 - **Never name a script `dev` or `build` in a Vercel project's package.json if
