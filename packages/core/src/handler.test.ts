@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 
 import { generateKeyPair, exportJWK, jwtVerify } from "jose";
 
-import { createHandler, validateNewMessage, LIMITS } from "./handler.ts";
+import { createHandler, matchMessageId, validateBody, validateNewMessage, LIMITS } from "./handler.ts";
 import { readSigningKey, type SigningKey } from "./token.ts";
 import type { Env } from "./env.ts";
 import type { FetchLike, Message } from "./supabase.ts";
@@ -43,6 +43,7 @@ const SAMPLE: Message = {
   name: "Ada",
   body: "Hello, world!",
   created_at: "2026-08-08T00:00:00Z",
+  edited_at: null,
 };
 
 type Call = { url: string; init: RequestInit | undefined };
@@ -64,6 +65,14 @@ function stubFetch(
 }
 
 const ADA = { label: "ada@example.com", subject: "user-123" };
+const MALLORY = { label: "mallory@example.com", subject: "user-666" };
+
+/**
+ * What PostgREST actually hands back for a list: the public columns PLUS the
+ * subject, which listMessages reads in order to drop it. Tests use this rather
+ * than SAMPLE so the stripping is exercised instead of assumed.
+ */
+const SAMPLE_ROW = { ...SAMPLE, subject: ADA.subject };
 
 function gateReturning(identity: { label: string; subject: string } | null) {
   return { name: "test-gate", resolve: async () => identity };
@@ -98,13 +107,37 @@ test("GET /api/health reports which platform answered and which gate is active",
 });
 
 test("GET /api/messages returns rows from PostgREST", async () => {
-  const stub = stubFetch({ body: [SAMPLE] });
+  const stub = stubFetch({ body: [SAMPLE_ROW] });
   const handler = handlerWith(stub);
 
   const response = await handler(new Request("https://x.dev/api/messages"));
 
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { messages: [SAMPLE] });
+  assert.deepEqual(await response.json(), { messages: [{ ...SAMPLE, mine: true }] });
+});
+
+test("`mine` is computed server-side and follows the subject, not the name", async () => {
+  // Two rows with the SAME displayed name, written by different people. A
+  // client-side comparison on `name` would flag both as editable; only the
+  // subject distinguishes them, and only the server ever sees it.
+  const stub = stubFetch({
+    body: [
+      { ...SAMPLE, id: 1, subject: ADA.subject },
+      { ...SAMPLE, id: 2, subject: MALLORY.subject },
+    ],
+  });
+  const handler = handlerWith(stub);
+
+  const response = await handler(new Request("https://x.dev/api/messages"));
+  const { messages } = (await response.json()) as { messages: { id: number; mine: boolean }[] };
+
+  assert.deepEqual(
+    messages.map((m) => [m.id, m.mine]),
+    [
+      [1, true],
+      [2, false],
+    ],
+  );
 });
 
 test("GET /api/messages sends the auth headers RLS depends on", async () => {
@@ -131,14 +164,39 @@ test("GET /api/messages sends the auth headers RLS depends on", async () => {
 });
 
 test("subject and gate are never exposed to the browser", async () => {
-  const stub = stubFetch({ body: [] });
+  // This used to assert on the `select` query param — that subject was never
+  // ASKED FOR. It is now asked for deliberately, so the assertion moved to
+  // where the invariant actually lives: what leaves the handler. That is the
+  // stronger test either way, because it holds no matter how the row is
+  // fetched.
+  const stub = stubFetch({ body: [{ ...SAMPLE_ROW, gate: "test-gate" }] });
   const handler = handlerWith(stub);
 
-  await handler(new Request("https://x.dev/api/messages"));
+  const response = await handler(new Request("https://x.dev/api/messages"));
+  const body = JSON.stringify(await response.json());
 
-  const select = new URL(String(stub.calls[0]?.url)).searchParams.get("select");
-  assert.equal(select, "id,name,body,created_at");
-  assert.doesNotMatch(select ?? "", /subject/, "the stable identity must stay server-side");
+  assert.doesNotMatch(body, /user-123/, "the stable identity must stay server-side");
+  assert.doesNotMatch(body, /subject/, "not even the key name should appear");
+  assert.doesNotMatch(body, /"gate"/, "which gate admitted an author is not public either");
+});
+
+test("every write path also withholds subject and gate", async () => {
+  // The read path was careful and the write paths were not: `return=
+  // representation` with no `select` hands back the ENTIRE row. Each of these
+  // asks PostgREST for the public columns explicitly.
+  for (const method of ["POST", "PATCH"] as const) {
+    const stub = stubFetch({ status: method === "POST" ? 201 : 200, body: [SAMPLE] });
+    const handler = handlerWith(stub);
+
+    const path = method === "POST" ? "/api/messages" : "/api/messages/1";
+    await handler(
+      new Request(`https://x.dev${path}`, { method, body: JSON.stringify({ body: "hi" }) }),
+    );
+
+    const select = new URL(String(stub.calls[0]?.url)).searchParams.get("select");
+    assert.equal(select, "id,name,body,created_at,edited_at", `${method} must pin its columns`);
+    assert.doesNotMatch(select ?? "", /subject|gate/, `${method} must not return attribution`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -268,7 +326,7 @@ test("POST /api/messages creates a message and returns 201", async () => {
   );
 
   assert.equal(response.status, 201);
-  assert.deepEqual(await response.json(), { message: SAMPLE });
+  assert.deepEqual(await response.json(), { message: { ...SAMPLE, mine: true } });
 
   // PostgREST stays silent unless you ask for the row back.
   const headers = stub.calls[0]?.init?.headers as Record<string, string>;
@@ -306,7 +364,7 @@ test("unknown routes 404 and OPTIONS advertises the allowed methods", async () =
     new Request("https://x.dev/api/messages", { method: "OPTIONS" }),
   );
   assert.equal(options.status, 204);
-  assert.equal(options.headers.get("allow"), "GET,POST,OPTIONS");
+  assert.equal(options.headers.get("allow"), "GET,POST,PATCH,DELETE,OPTIONS");
 });
 
 test("no response carries CORS headers", async () => {
@@ -404,6 +462,8 @@ test("no route reaches the database without the gate's approval", async () => {
     new Request("https://x.dev/api/messages"),
     new Request("https://x.dev/api/messages", { method: "POST", body: "{}" }),
     new Request("https://x.dev/api/messages", { method: "DELETE" }),
+    new Request("https://x.dev/api/messages/1", { method: "PATCH", body: "{}" }),
+    new Request("https://x.dev/api/messages/1", { method: "DELETE" }),
   ]) {
     assert.equal((await handler(request)).status, 401);
   }
@@ -521,4 +581,171 @@ test("validateNewMessage enforces the documented limits", () => {
 
   const trimmed = validateNewMessage({ name: "  Ada  ", body: "  hi  " });
   assert.deepEqual(trimmed.ok && trimmed.value, { name: "Ada", body: "hi" });
+});
+
+// ---------------------------------------------------------------------------
+// Editing and deleting your own entry.
+//
+// The ownership rule is enforced by RLS, not by this code, so these tests
+// cannot prove Mallory is refused — a stub fetch will happily return whatever
+// it is told to. What they CAN prove is the half that lives here: that the
+// handler asks for the right thing, sends nothing it should not, and reads an
+// empty result as a refusal rather than a success.
+//
+// The other half is proved against the real database by
+// `uv run playstack-ops audit-rls`. Splitting it that way is deliberate — a
+// unit test that "verified" a policy by mocking the database would only be
+// testing the mock.
+// ---------------------------------------------------------------------------
+
+test("PATCH sends only the body — attribution is not up for editing", async () => {
+  const stub = stubFetch({ body: [{ ...SAMPLE, body: "edited" }] });
+  const handler = handlerWith(stub);
+
+  const response = await handler(
+    new Request("https://x.dev/api/messages/1", {
+      method: "PATCH",
+      body: JSON.stringify({
+        body: "edited",
+        // All of these are ignored. The trigger would pin them anyway; not
+        // forwarding them means the database never has to.
+        name: "Someone Else Entirely",
+        subject: MALLORY.subject,
+        gate: "some-other-gate",
+        created_at: "1999-01-01T00:00:00Z",
+        edited_at: null,
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+
+  const call = stub.calls[0];
+  assert.equal(call?.init?.method, "PATCH");
+  assert.match(String(call?.url), /id=eq\.1/, "the id must reach PostgREST as a filter");
+  assert.deepEqual(
+    JSON.parse(String(call?.init?.body)),
+    { body: "edited" },
+    "only the body may be written",
+  );
+});
+
+test("PATCH answers 404 when the update matched nothing", async () => {
+  // THE IMPORTANT ONE. RLS does not refuse, it filters: editing somebody
+  // else's entry produces 200 with an empty array — identical to an id that
+  // never existed. A handler that trusted `response.ok` would report success
+  // for an edit that changed nothing, and the UI would say "saved".
+  const stub = stubFetch({ status: 200, body: [] });
+  const handler = handlerWith(stub);
+
+  const response = await handler(
+    new Request("https://x.dev/api/messages/999", {
+      method: "PATCH",
+      body: JSON.stringify({ body: "not mine" }),
+    }),
+  );
+
+  assert.equal(response.status, 404, "an empty result set is a refusal, not a success");
+
+  // Not-found and not-yours are given the same answer on purpose: confirming
+  // that entry 999 exists is not something a stranger has earned.
+  const { error } = (await response.json()) as { error: string };
+  assert.doesNotMatch(error, /permission|forbidden|policy|owner/i);
+});
+
+test("DELETE answers 404 when nothing was removed, 200 when something was", async () => {
+  const empty = stubFetch({ status: 200, body: [] });
+  const missing = await handlerWith(empty)(
+    new Request("https://x.dev/api/messages/999", { method: "DELETE" }),
+  );
+  assert.equal(missing.status, 404);
+
+  // `return=representation` is what makes the distinction possible — a bare
+  // DELETE answers 204 either way, so there would be nothing to check.
+  const removed = stubFetch({ status: 200, body: [{ id: 1 }] });
+  const gone = await handlerWith(removed)(
+    new Request("https://x.dev/api/messages/1", { method: "DELETE" }),
+  );
+  assert.equal(gone.status, 200);
+  assert.deepEqual(await gone.json(), { ok: true });
+
+  const headers = removed.calls[0]?.init?.headers as Record<string, string>;
+  assert.equal(headers.Prefer, "return=representation");
+});
+
+test("an edit is validated before it reaches the database", async () => {
+  for (const payload of [
+    { body: "" },
+    { body: "   " },
+    { body: "x".repeat(LIMITS.bodyMax + 1) },
+    { body: 42 },
+    {},
+  ]) {
+    const stub = stubFetch({ body: [] });
+    const response = await handlerWith(stub)(
+      new Request("https://x.dev/api/messages/1", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    );
+
+    assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(payload)}`);
+    assert.equal(stub.calls.length, 0, "must not hit the database on bad input");
+  }
+});
+
+test("matchMessageId accepts only a bare integer segment", () => {
+  assert.equal(matchMessageId("/api/messages/1"), 1);
+  assert.equal(matchMessageId("/api/messages/42"), 42);
+
+  // Anything that is not digits is not this route, so nothing exotic can ever
+  // reach the `eq.` filter.
+  for (const path of [
+    "/api/messages",
+    "/api/messages/",
+    "/api/messages/abc",
+    "/api/messages/1/2",
+    "/api/messages/-1",
+    "/api/messages/1;drop",
+    "/api/messages/1%20or%201=1",
+  ]) {
+    assert.equal(matchMessageId(path), null, `${path} must not match`);
+  }
+});
+
+test("methods are scoped to the right route", async () => {
+  const handler = handlerWith(stubFetch({ body: [] }));
+
+  // The collection does not take PATCH or DELETE...
+  for (const method of ["PATCH", "DELETE"] as const) {
+    const response = await handler(
+      new Request("https://x.dev/api/messages", { method, body: "{}" }),
+    );
+    assert.equal(response.status, 405, `${method} /api/messages should be 405`);
+  }
+
+  // ...and one entry does not take GET or POST.
+  for (const method of ["GET", "POST"] as const) {
+    const response = await handler(
+      new Request("https://x.dev/api/messages/1", {
+        method,
+        body: method === "POST" ? "{}" : undefined,
+      }),
+    );
+    assert.equal(response.status, 405, `${method} /api/messages/1 should be 405`);
+  }
+});
+
+test("validateBody enforces the same limit as the create path", () => {
+  assert.equal(validateBody("hi").ok, true);
+  assert.equal(validateBody("").ok, false);
+  assert.equal(validateBody("   ").ok, false);
+  assert.equal(validateBody(undefined).ok, false);
+  assert.equal(validateBody(null).ok, false);
+  assert.equal(validateBody(42).ok, false);
+  assert.equal(validateBody("x".repeat(LIMITS.bodyMax)).ok, true);
+  assert.equal(validateBody("x".repeat(LIMITS.bodyMax + 1)).ok, false);
+
+  const trimmed = validateBody("  hi  ");
+  assert.equal(trimmed.ok && trimmed.value, "hi");
 });

@@ -35,8 +35,10 @@
 import type { Env } from "./env.ts";
 import {
   createMessage,
+  deleteMessage,
   listMessages,
   SupabaseError,
+  updateMessage,
   type FetchLike,
   type NewMessage,
 } from "./supabase.ts";
@@ -150,6 +152,49 @@ export type ValidationResult =
   | { ok: true; value: NewMessage }
   | { ok: false; error: string };
 
+export type BodyValidationResult =
+  | { ok: true; value: string }
+  | { ok: false; error: string };
+
+/**
+ * Validate the one field a visitor actually controls.
+ *
+ * Shared by the create and edit paths so the two cannot drift. An edit that
+ * accepted a 900-character body because only the insert path checked would be
+ * caught by the CHECK constraint on the table — as a 400 from PostgREST naming
+ * a constraint, rather than a sentence explaining what to fix.
+ */
+export function validateBody(input: unknown): BodyValidationResult {
+  if (typeof input !== "string") {
+    return { ok: false, error: "'body' must be a string" };
+  }
+
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return { ok: false, error: "'body' is required" };
+  if (trimmed.length > LIMITS.bodyMax) {
+    return { ok: false, error: `'body' must be at most ${LIMITS.bodyMax} characters` };
+  }
+
+  return { ok: true, value: trimmed };
+}
+
+/**
+ * Pull the id out of `/api/messages/123`, or null if this is not that route.
+ *
+ * The regex only accepts digits, so nothing else can reach the `eq.` filter
+ * downstream. That is belt-and-braces rather than the actual defence — the id
+ * travels as a URLSearchParams value and PostgREST parameterises it — but a
+ * route that structurally cannot carry anything but a number is one fewer
+ * thing to reason about.
+ */
+export function matchMessageId(pathname: string): number | null {
+  const match = /^\/api\/messages\/(\d+)$/.exec(pathname);
+  if (!match) return null;
+
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
 /**
  * Validate untrusted JSON from the browser.
  *
@@ -205,7 +250,10 @@ export function createHandler(deps: HandlerDeps) {
     // Same-origin only, so there is no preflight to answer — just advertise
     // what this endpoint accepts.
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { allow: "GET,POST,OPTIONS" } });
+      return new Response(null, {
+        status: 204,
+        headers: { allow: "GET,POST,PATCH,DELETE,OPTIONS" },
+      });
     }
 
     try {
@@ -222,7 +270,12 @@ export function createHandler(deps: HandlerDeps) {
         });
       }
 
-      if (pathname === "/api/messages") {
+      // `/api/messages` is the collection; `/api/messages/123` is one entry.
+      // Both need the same verified caller and the same minted token, so they
+      // share a branch rather than duplicating the gate.
+      const messageId = matchMessageId(pathname);
+
+      if (pathname === "/api/messages" || messageId !== null) {
         // Resolve identity once, before any method-specific work. If the gate
         // cannot vouch for this caller, nothing else happens — no read, no
         // write, no database call at all.
@@ -231,16 +284,94 @@ export function createHandler(deps: HandlerDeps) {
           return json({ error: `Not authenticated (${deps.gate.name})` }, 401);
         }
 
-        // Mint once, use for both read and write. The anon key can no longer
-        // touch this table, so even a GET now requires a verified caller.
+        // Mint once, use for every method. The anon key can no longer touch
+        // this table, so even a GET now requires a verified caller.
         const accessToken = await mintAccessToken(
           deps.signingKey,
           identity,
           deps.gate.name,
         );
 
+        // -------------------------------------------------------------------
+        // One entry: PATCH and DELETE.
+        //
+        // Note what is NOT here: any check that the entry belongs to the
+        // caller. It would be redundant. The token carries the subject, the
+        // policies compare it to the row, and a mismatch means the statement
+        // matches nothing. Writing the check here as well would create a
+        // second place for the rule to live and a second place for it to rot —
+        // and it is the weaker of the two, because it only guards this code
+        // path while the policy guards the table.
+        // -------------------------------------------------------------------
+        if (messageId !== null) {
+          if (request.method === "PATCH") {
+            let payload: unknown;
+            try {
+              payload = await request.json();
+            } catch {
+              return json({ error: "Request body must be valid JSON" }, 400);
+            }
+
+            if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+              return json({ error: "Expected a JSON object" }, 400);
+            }
+
+            // Only `body` is read. The POST path has to defensively overwrite
+            // `name`; here there is nothing to overwrite, because an edit
+            // structurally cannot change attribution — the trigger pins those
+            // columns whatever this code sends.
+            const result = validateBody((payload as Record<string, unknown>).body);
+            if (!result.ok) {
+              return json({ error: result.error }, 400);
+            }
+
+            const message = await updateMessage(
+              deps.env,
+              deps.fetch,
+              accessToken,
+              messageId,
+              result.value,
+            );
+
+            // Null means the statement matched no row — someone else's entry,
+            // or none at all. Those two cases are deliberately given the SAME
+            // answer: telling a stranger that entry 41 exists but is not
+            // theirs is a fact they have not earned, and it is exactly how you
+            // enumerate a table you cannot read.
+            if (!message) {
+              return json({ error: "No such entry, or it is not yours" }, 404);
+            }
+
+            return json({ message: { ...message, mine: true } });
+          }
+
+          if (request.method === "DELETE") {
+            const removed = await deleteMessage(
+              deps.env,
+              deps.fetch,
+              accessToken,
+              messageId,
+            );
+
+            if (!removed) {
+              return json({ error: "No such entry, or it is not yours" }, 404);
+            }
+
+            return json({ ok: true });
+          }
+
+          return json({ error: `Method ${request.method} not allowed` }, 405);
+        }
+
         if (request.method === "GET") {
-          const messages = await listMessages(deps.env, deps.fetch, accessToken);
+          // The subject decides which entries come back flagged `mine`. It is
+          // used for the comparison and then dropped — see listMessages.
+          const messages = await listMessages(
+            deps.env,
+            deps.fetch,
+            accessToken,
+            identity.subject,
+          );
           return json({ messages });
         }
 
@@ -281,7 +412,11 @@ export function createHandler(deps: HandlerDeps) {
             subject: identity.subject,
             gate: deps.gate.name,
           });
-          return json({ message }, 201);
+          // An entry you just wrote is definitionally yours, so the flag is a
+          // constant rather than a comparison — but it is still sent, because
+          // the frontend renders a created entry with the same code that
+          // renders a listed one.
+          return json({ message: { ...message, mine: true } }, 201);
         }
 
         return json({ error: `Method ${request.method} not allowed` }, 405);

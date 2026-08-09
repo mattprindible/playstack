@@ -126,7 +126,7 @@ form, no password, no session table, no reset email — you list addresses in a
 policy and Cloudflare authenticates at the edge before your Worker runs. The
 best auth implementation is the one you didn't write.
 
-Two things that setup teaches:
+Three things that setup teaches:
 
 - `workers_dev: false` is load-bearing. **Access protects a hostname, not a
   Worker.** Leave the `.workers.dev` route on and your gated app has a public
@@ -134,6 +134,27 @@ Two things that setup teaches:
 - The Worker verifies the Access JWT itself — issuer *and* audience. Without
   the audience check, a token minted for any other app in your account would be
   accepted. A gate you didn't verify is a gate someone can walk around.
+- **Access matches on paths, not methods — so "anyone can read, only friends can
+  write" cannot be expressed in an Access policy.** This one only surfaces when
+  you go looking. Probing the live deployment:
+
+  ```
+  GET https://playstack.haha.computer/             → 302 to the Access login
+  GET https://playstack.haha.computer/api/messages → 302 to the Access login
+  ```
+
+  A public reader never reaches the Worker, so no amount of handler code makes
+  a response public. Getting there means splitting the write endpoint onto its
+  own path and scoping the Access application to that path alone — at which
+  point the Worker's own JWT verification stops being defence in depth and
+  becomes the only gate. You also lose the automatic login redirect, because
+  Access only bounces you when it protects the path you asked for.
+
+  The generalisation is the useful part: **edge authentication is all-or-nothing
+  per hostname.** If an app needs a mixed public/private surface, the gate has
+  to live in code, where it can see the method. Decide which shape you are
+  building before you pick where the gate goes — retrofitting it means moving
+  the gate, not editing it.
 
 **ATProto is where "collapse everything onto Cloudflare" breaks.** The official
 `@atproto/oauth-client-node` does not run on Workers
@@ -504,8 +525,8 @@ playstack/
 ├── packages/core/            ← ALL the logic, platform- and gate-agnostic
 │   └── src/
 │       ├── handler.ts          the (Request) => Response router + Gate
-│       ├── handler.test.ts     gates, routing, validation
-│       ├── env.test.ts         env validation (20 tests total, zero deps)
+│       ├── handler.test.ts     gates, routing, validation, ownership
+│       ├── env.test.ts         env validation (36 tests total, zero deps)
 │       ├── supabase.ts         PostgREST over plain fetch
 │       └── env.ts              the one place platforms differ
 │
@@ -516,7 +537,7 @@ playstack/
 │   │   └── style.css
 │   ├── api/
 │   │   ├── [...path].ts        catch-all → core handler (+ Node↔Web adapter)
-│   │   └── atproto/            login, callback, client-metadata, me
+│   │   └── atproto/            login, callback, client-metadata, me, logout
 │   ├── lib/atproto/            OAuth client, session cookie, Supabase store
 │   └── vercel.json             project config (NOT vercel.ts — see above)
 │
@@ -527,7 +548,8 @@ playstack/
 ├── supabase/migrations/      ← the schema AND the security model
 │   ├── …_create_messages.sql      the table, RLS on
 │   ├── …_atproto_oauth_sessions.sql  REVOKEd from anon, zero policies
-│   └── …_attributed_messages.sql  anon revoked; inserts must match your token
+│   ├── …_attributed_messages.sql  anon revoked; inserts must match your token
+│   └── …_editable_entries.sql     edit/delete your own rows — policy + trigger
 │
 ├── tools/                    ← uv-managed Python ops CLI
 │   └── .python-version         pins 3.14 — see note in .gitignore
@@ -639,20 +661,43 @@ the opposite: it bypasses RLS completely, and it appears nowhere in this repo.
 ## Row Level Security, and proving it
 
 `…_create_messages.sql` turns RLS on, and `…_attributed_messages.sql` is where
-the model actually lives: `anon` is revoked from the table entirely,
-`authenticated` holds exactly `SELECT, INSERT`, and the insert policy requires
-the row to match the caller's own token. There is deliberately **no update or
-delete policy** — under deny-by-default, their absence *is* the enforcement,
-and it applies to your own rows too.
+the model actually lives: `anon` is revoked from the table entirely, and the
+insert policy requires the row to match the caller's own token.
+`…_editable_entries.sql` then adds the one pattern every real app needs and a
+guestbook can get away without — **you may edit and delete your own rows, and
+only your own.**
 
 Don't take that on faith. `uv run playstack-ops audit-rls` behaves like an
 attacker in two passes: first holding only the public anon key (which should
-now achieve *nothing*, including with a forged token), then holding a
-legitimately minted one, checking it cannot write as anybody else.
+achieve *nothing*, including with a forged token), then holding a legitimately
+minted one, checking it cannot write, edit or delete as anybody else.
 
 See [Database-enforced attribution](#database-enforced-attribution) for why it
 works this way, and for the two traps found by testing rather than reading:
 `auth.uid()` casting to UUID, and `TRUNCATE` ignoring RLS completely.
+
+### The two traps in "edit your own row"
+
+Both are the same shape — Postgres accepts something that looks right and
+quietly does less than you meant.
+
+**An UPDATE policy has two halves.** `using` picks which existing rows you may
+target; `with check` constrains what they may become. Omit `with check` and
+Postgres reuses `using` for both without complaint. `using` only asks "is this
+row yours", which an edited row still answers yes to *after* you have changed
+the name on it — so the forgery the INSERT policy was written to prevent
+becomes available one statement later. Insert honestly, then edit into a lie.
+DELETE takes no `with check` at all, because it writes no row.
+
+**`with check` cannot see the old row.** It is handed only the new one, so
+"this column may not change" is not expressible in RLS — there is nothing to
+compare against. That is why `created_at` and `edited_at` are pinned by a
+`BEFORE UPDATE` trigger instead: a trigger sees `OLD` and `NEW` both. RLS
+constrains what a row *is*; only a trigger constrains what it *changed from*.
+
+The upshot is that four different mechanisms each hold up one rule — grants,
+policies, a trigger, and a revoke — and no single one of them could have
+carried the others.
 
 ---
 

@@ -213,36 +213,128 @@ def audit_rls() -> int:
                     print(f"{OK} cannot write as {what} (HTTP {probe.status_code})")
 
             if canary_id is not None:
+                columns = "body,name,subject,gate,created_at,edited_at"
+
+                def read_canary() -> dict:
+                    rows = client.get(
+                        f"{config.rest_url}/messages",
+                        headers=mine,
+                        params={"id": f"eq.{canary_id}", "select": columns},
+                    ).json()
+                    return rows[0] if rows else {}
+
+                # ----------------------------------------------------------
+                # Editing your own entry. This USED to be refused outright —
+                # there was no update policy at all, and the audit asserted
+                # exactly that. The editable-entries migration made it legal,
+                # so the expectation here inverts.
+                # ----------------------------------------------------------
                 client.patch(
                     f"{config.rest_url}/messages",
                     headers=mine,
                     params={"id": f"eq.{canary_id}"},
-                    json={"body": "TAMPERED"},
+                    json={"body": "edited by its author"},
                 )
-                check = client.get(
+                row = read_canary()
+
+                if row.get("body") == "edited by its author":
+                    print(f"{OK} an author CAN edit their own entry")
+                else:
+                    print(f"{FAIL} an author cannot edit their own entry (update policy missing?)")
+                    failures += 1
+
+                if row.get("edited_at"):
+                    print(f"{OK} the database stamped edited_at")
+                else:
+                    print(f"{FAIL} edited_at was not stamped — the trigger is missing")
+                    failures += 1
+
+                created_before = row.get("created_at")
+
+                # Now the interesting half. An edit may change the body and
+                # NOTHING else. Note this statement is ACCEPTED rather than
+                # rejected: RLS cannot compare a new row against the old one,
+                # so the trigger silently pins the immutable columns instead.
+                # "Succeeded but changed nothing it shouldn't" is the pass.
+                client.patch(
                     f"{config.rest_url}/messages",
                     headers=mine,
-                    params={"id": f"eq.{canary_id}", "select": "body"},
-                ).json()
-                if check and check[0]["body"] == "TAMPERED":
-                    print(f"{FAIL} UPDATE SUCCEEDED — a signer can rewrite their own history!")
+                    params={"id": f"eq.{canary_id}"},
+                    json={
+                        "body": "still mine",
+                        "name": "Someone Important",
+                        "subject": "did:plc:somebody-else",
+                        "gate": "cloudflare-access",
+                        "created_at": "1999-01-01T00:00:00+00:00",
+                        "edited_at": None,
+                    },
+                )
+                after = read_canary()
+
+                for column, expected in (
+                    ("name", "rls-audit"),
+                    ("subject", me),
+                    ("gate", "audit"),
+                    ("created_at", created_before),
+                ):
+                    if after.get(column) == expected:
+                        print(f"{OK} an edit cannot change {column}")
+                    else:
+                        print(f"{FAIL} an edit CHANGED {column} to {after.get(column)!r}!")
+                        failures += 1
+
+                if after.get("edited_at"):
+                    print(f"{OK} an edit cannot hide that it happened")
+                else:
+                    print(f"{FAIL} edited_at was nulled — the trigger does not pin it")
+                    failures += 1
+
+                # ----------------------------------------------------------
+                # Somebody else's entry stays somebody else's.
+                #
+                # The tell here is NOT an error status. RLS filters rather than
+                # refusing, so a forbidden update matches zero rows and comes
+                # back looking like a success. The only honest check is whether
+                # the row actually moved.
+                # ----------------------------------------------------------
+                stranger = config.signed_headers("audit:stranger", "audit", "rls-audit")
+
+                client.patch(
+                    f"{config.rest_url}/messages",
+                    headers=stranger,
+                    params={"id": f"eq.{canary_id}"},
+                    json={"body": "TAMPERED"},
+                )
+                if read_canary().get("body") == "TAMPERED":
+                    print(f"{FAIL} A STRANGER EDITED SOMEBODY ELSE'S ENTRY!")
                     failures += 1
                 else:
-                    print(f"{OK} cannot edit even their OWN row (no update policy)")
+                    print(f"{OK} a stranger cannot edit an entry that is not theirs")
 
+                client.delete(
+                    f"{config.rest_url}/messages",
+                    headers=stranger,
+                    params={"id": f"eq.{canary_id}"},
+                )
+                if read_canary():
+                    print(f"{OK} a stranger cannot delete an entry that is not theirs")
+                else:
+                    print(f"{FAIL} A STRANGER DELETED SOMEBODY ELSE'S ENTRY!")
+                    failures += 1
+
+                # ----------------------------------------------------------
+                # Deleting your own entry — also newly legal, and it doubles as
+                # cleanup. Every previous audit run left its canary behind in
+                # the guestbook, because deletion was impossible by design.
+                # ----------------------------------------------------------
                 client.delete(
                     f"{config.rest_url}/messages", headers=mine, params={"id": f"eq.{canary_id}"}
                 )
-                still = client.get(
-                    f"{config.rest_url}/messages",
-                    headers=mine,
-                    params={"id": f"eq.{canary_id}", "select": "id"},
-                ).json()
-                if still:
-                    print(f"{OK} cannot delete even their OWN row (no delete policy)")
-                else:
-                    print(f"{FAIL} DELETE SUCCEEDED — the guestbook is erasable!")
+                if read_canary():
+                    print(f"{FAIL} an author cannot delete their own entry (delete policy missing?)")
                     failures += 1
+                else:
+                    print(f"{OK} an author CAN delete their own entry (canary cleaned up)")
 
     print()
     if failures:
@@ -250,9 +342,11 @@ def audit_rls() -> int:
         return 1
 
     print(
-        f"{OK} The database enforces attribution.\n\n"
+        f"{OK} The database enforces attribution AND ownership.\n\n"
         f"  Forging an entry now requires the SIGNING KEY, not a bearer key.\n"
-        f"  The anon key is public by design and, on this table, useless."
+        f"  The anon key is public by design and, on this table, useless.\n"
+        f"  An author may edit and delete their own entry, may change nothing\n"
+        f"  but its body, and cannot touch anybody else's."
     )
     return 0
 

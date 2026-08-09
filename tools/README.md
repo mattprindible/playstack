@@ -50,9 +50,20 @@ caller can read and write *as themselves*, and cannot write as another subject,
 another display name, or another gate. Skipped with a warning if the signing
 key is not configured locally.
 
-Both passes end by confirming nobody can edit or delete anything, **including
-their own rows** — there is no update or delete policy, and their absence is
-the enforcement.
+Pass 2 then covers ownership, which is where the expectations recently
+inverted: an author **can** now edit and delete their own entry, **cannot**
+change anything but its body, and **cannot** touch anybody else's.
+
+Two of those are checked in an unusual way, because RLS filters rather than
+refusing. A stranger's edit comes back looking like a success — it simply
+matched no rows — so the audit re-reads the row and asserts it did not move,
+rather than trusting a status code. Likewise the immutable columns are pinned
+by a trigger, not a policy, so tampering is *accepted and ignored*: the pass
+condition is "the statement succeeded and changed nothing it shouldn't."
+
+A side effect worth having: the audit now cleans up after itself. Every run
+before this left its canary row in the guestbook, because deletion was
+impossible by design.
 
 `seed` needs the signing key too. Since the migration there is no way to insert
 a row that nobody vouched for, so seeded messages are attributed to an

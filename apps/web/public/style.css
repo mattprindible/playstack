@@ -76,9 +76,14 @@ main { max-width: 42rem; margin: 0 auto; }
 .whoami-anon { color: var(--danger); border-color: currentColor; }
 
 /* A button that reads as a link: signing out is an action, not navigation, so
-   it has to be a <button>, but it should not compete with the submit button. */
+   it has to be a <button>, but it should not compete with the submit button.
+   Also used by the per-entry Edit/Delete/Save controls.
+
+   No margin here. It used to carry `margin: -0.5rem 0 1rem`, which is spacing
+   for where the sign-out button sits rather than anything to do with looking
+   like a link — so every later use of the class inherited a nudge meant for
+   one specific button. Positional spacing belongs to the position. */
 .linklike {
-  margin: -0.5rem 0 1rem;
   padding: 0;
   width: auto;
   font-size: 0.8rem;
@@ -89,7 +94,13 @@ main { max-width: 42rem; margin: 0 auto; }
   cursor: pointer;
 }
 
-.linklike:hover { color: var(--fg); }
+/* var(--fg) was never defined, so this rule silently did nothing: an unknown
+   custom property makes the declaration invalid at computed-value time and the
+   colour falls back to inherited. A typo'd variable fails quietly — which is
+   the whole hazard of custom properties. */
+.linklike:hover { color: var(--text); }
+
+#signout { margin: -0.5rem 0 1rem; }
 
 .row { display: flex; gap: 0.5rem; }
 .row input { flex: 1; }
@@ -185,9 +196,36 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .entry-name { font-weight: 650; }
 .entry-time { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
 
+.entry-meta { display: flex; align-items: baseline; gap: 0.5rem; white-space: nowrap; }
+
+/* Quiet by design. That an entry was edited should be discoverable, not
+   announced — it is a note about the text, not a status the author must wear. */
+.entry-edited {
+  font-size: 0.72rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 0.4rem;
+}
+
 /* white-space: pre-wrap preserves the author's line breaks. We set text via
    textContent in app.js, so user input is never parsed as HTML. */
 .entry-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.entry-actions { display: flex; gap: 0.9rem; margin-top: 0.6rem; }
+
+.entry-edit { display: grid; gap: 0.5rem; margin: 0; }
+
+.entry-edit-input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  resize: vertical;
+}
 
 .empty { color: var(--muted); font-style: italic; }
 
