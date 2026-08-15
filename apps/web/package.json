@@ -8,10 +8,10 @@
     "vercel:deploy": "vercel deploy --prebuilt --prod"
   },
   "devDependencies": {
-    "vercel": "^58.7.1"
+    "vercel": "^58.9.4"
   },
   "dependencies": {
-    "@atproto/api": "^0.20.38",
+    "@atproto/api": "^0.20.39",
     "@atproto/oauth-client-node": "^0.5.3",
     "jose": "^6.2.8"
   }
