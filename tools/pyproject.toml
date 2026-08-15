@@ -19,7 +19,7 @@ dependencies = ["httpx>=0.28", "pyjwt[crypto]>=2.13.0"]
 playstack-ops = "playstack_ops.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.2,<0.15"]
+requires = ["uv_build>=0.12.3,<0.15"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
