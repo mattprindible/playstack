@@ -11,8 +11,8 @@
     "vercel": "^58.7.1"
   },
   "dependencies": {
-    "@atproto/api": "^0.20.38",
+    "@atproto/api": "^0.20.41",
     "@atproto/oauth-client-node": "^0.5.3",
-    "jose": "^6.2.8"
+    "jose": "^6.2.9"
   }
 }
