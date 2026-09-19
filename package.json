@@ -25,8 +25,8 @@
     "status": "cd tools && uv run playstack-ops status"
   },
   "devDependencies": {
-    "@types/node": "^24.10.1",
-    "supabase": "^2.112.0",
+    "@types/node": "^24.13.5",
+    "supabase": "^2.117.0",
     "typescript": "^5.9.3"
   }
 }
